@@ -137,8 +137,8 @@ class Driver {
 		Console.WriteLine ("\t--skip-aot-assemblies=x List of assemblies to skip AOT in AOT+INTERP mode.");
 		Console.WriteLine ("\t--aot-profile=x Use 'x' as the AOT profile.");
 		Console.WriteLine ("\t--link-mode=sdkonly|all        Set the link type used for AOT. (EXPERIMENTAL)");
-        Console.WriteLine ("\t--pinvoke-libs=x DllImport libraries used.");
-        Console.WriteLine ("\t\t              'sdkonly' only link the Core libraries.");
+		Console.WriteLine ("\t--pinvoke-libs=x DllImport libraries used.");
+		Console.WriteLine ("\t\t              'sdkonly' only link the Core libraries.");
 		Console.WriteLine ("\t\t              'all' link Core and User assemblies. (default)");
 		Console.WriteLine ("\t--pinvoke-libs=x DllImport libraries used.");
 		Console.WriteLine ("\t--native-lib=x  Link the native library 'x' into the final executable.");
@@ -255,7 +255,7 @@ class Driver {
 		foreach (var prefix in bcl_prefixes)
 			resolver.AddSearchDirectory (prefix);
 		resolver.AddSearchDirectory(bcl_facades_prefix);
-		resolver.AddSearchDirectory(framework_prefix);		
+		resolver.AddSearchDirectory(framework_prefix);
 		rp.AssemblyResolver = resolver;
 
 		rp.InMemory = true;
@@ -343,7 +343,7 @@ class Driver {
 	{
 		Default,
 		Always,
-		IfNewer		
+		IfNewer
 	}
 
 	enum ExecMode {
@@ -355,7 +355,7 @@ class Driver {
 	enum LinkMode
 	{
 		SdkOnly,
-		All		
+		All
 	}
 
 	class WasmOptions {
@@ -387,6 +387,7 @@ class Driver {
 		app_prefix = Environment.CurrentDirectory;
 		var deploy_prefix = "managed";
 		var vfs_prefix = "managed";
+		var use_release_runtime = true;
 		var enable_aot = false;
 		var enable_dedup = true;
 		var print_usage = false;
@@ -423,18 +424,18 @@ class Driver {
 		var runtime_config = "release";
 
 		var opts = new WasmOptions () {
-				AddBinding = true,
-				Debug = false,
-				DebugRuntime = false,
-				Linker = false,
-				ILStrip = true,
-				LinkerVerbose = false,
-				EnableZLib = false,
-				EnableFS = false,
-				NativeStrip = true,
-				Simd = false,
-				EnableDynamicRuntime = false
-			};
+			AddBinding = true,
+			Debug = false,
+			DebugRuntime = false,
+			Linker = false,
+			ILStrip = true,
+			LinkerVerbose = false,
+			EnableZLib = false,
+			EnableFS = false,
+			NativeStrip = true,
+			Simd = false,
+			EnableDynamicRuntime = false
+		};
 
 		var p = new OptionSet () {
 				{ "nobinding", s => opts.AddBinding = false },
@@ -516,18 +517,32 @@ class Driver {
 		enable_dynamic_runtime = opts.EnableDynamicRuntime;
 		enable_simd = opts.Simd;
 
-        if (opts.DebugRuntime) {
-            runtime_config = "release";
-        }
-        else {
-			if(runtime_config != "debug" &&
-				runtime_config != "release" &&
-				runtime_config != "release-dynamic") {
-                Console.WriteLine("Invalid --runtime-config value. Must be either debug, release or release-dynamic.");
-                Usage();
-                return 1;
-            }
-        }
+		if (opts.DebugRuntime) {
+			runtime_config = "release";
+		} else {
+			switch (runtime_config) {
+			case "debug":
+				enable_debug = true;
+				break;
+
+			case "release":
+				break;
+
+			case "dynamic-release":
+				enable_dynamic_runtime = true;
+				break;
+
+			case "dynamic-debug":
+				enable_dynamic_runtime = true;
+				enable_debug = true;
+				break;
+
+			default:
+				Console.WriteLine ("Invalid --runtime-config value. Must be either debug, release, dynamic-release, dynamic-debug.");
+				Usage ();
+				return 1;
+			}
+		}
 
 		if (ee_mode == ExecMode.Aot || ee_mode == ExecMode.AotInterp)
 			enable_aot = true;
@@ -682,7 +697,7 @@ class Driver {
 
 		// the linker does not consider these core by default
 		var wasm_core_assemblies = new Dictionary<string, bool> ();
-		if (add_binding) {		
+		if (add_binding) {
 			wasm_core_assemblies [BINDINGS_ASM_NAME] = true;
 			wasm_core_assemblies [HTTP_ASM_NAME] = true;
 			wasm_core_assemblies [WEBSOCKETS_ASM_NAME] = true;
@@ -721,13 +736,13 @@ class Driver {
 
 		if (enable_dedup) {
 			dedup_asm = new AssemblyData () { name = "aot-dummy",
-					filename = "aot-dummy.dll",
-					bc_path = "$builddir/aot-dummy.dll.bc",
-					o_path = "$builddir/aot-dummy.dll.o",
-					app_path = "$appdir/$deploy_prefix/aot-dummy.dll",
-					linkout_path = "$builddir/linker-out/aot-dummy.dll",
-					aot = true
-					};
+				filename = "aot-dummy.dll",
+				bc_path = "$builddir/aot-dummy.dll.bc",
+				o_path = "$builddir/aot-dummy.dll.o",
+				app_path = "$appdir/$deploy_prefix/aot-dummy.dll",
+				linkout_path = "$builddir/linker-out/aot-dummy.dll",
+				aot = true
+			};
 			assemblies.Add (dedup_asm);
 			file_list.Add ("aot-dummy.dll");
 		}
@@ -761,7 +776,7 @@ class Driver {
 			}
 
 			foreach(var asset in assets) {
-				CopyFile (asset, 
+				CopyFile (asset,
 						Path.Combine (out_prefix, Path.GetFileName (asset)), copyType, "Asset: ");
 			}
 		}
@@ -794,7 +809,16 @@ class Driver {
 			GenDriver (builddir, profilers, ee_mode, link_icalls);
 		}
 
-		string runtime_dir = is_netcore ? "$mono_sdkdir/wasm-runtime-netcore-release" : "$mono_sdkdir/wasm-runtime-release";
+		string runtime_dir = "";
+
+		if (is_netcore) {
+			runtime_dir = "$mono_sdkdir/wasm-runtime-netcore-release";
+		} else if (runtime_config == "release-dynamic" || runtime_config == "debug-dynamic") {
+			runtime_dir = "$mono_sdkdir/wasm-runtime-dynamic-release";
+		} else {
+			runtime_dir = "$mono_sdkdir/wasm-runtime-release";
+		}
+
 		string runtime_libdir = $"{runtime_dir}/lib";
 
 		string runtime_libs = "";
@@ -891,17 +915,14 @@ class Driver {
 		else
 			ninja.WriteLine ("cross = $mono_sdkdir/wasm-cross-release/bin/wasm32-unknown-none-mono-sgen");
 
-		if(runtime_config == "release-dynamic")
-        {
+		if(runtime_config == "release-dynamic"){
 			ninja.WriteLine("emcc = source $emsdk_env && EMCC_FORCE_STDLIBS=1 emcc");
 			// -s ASSERTIONS=2 is very slow
-			ninja.WriteLine($"emcc_flags = -Oz -g {emcc_flags}-s EMULATED_FUNCTION_POINTERS=1 -s MAIN_MODULE=1 -s EXPORT_ALL=1 -s RESERVED_FUNCTION_POINTERS=64 -s DISABLE_EXCEPTION_CATCHING=0 -s ASSERTIONS=1 -s WASM=1 -s ALLOW_MEMORY_GROWTH=1 -s BINARYEN=1 -s TOTAL_MEMORY=134217728 -s ALIASING_FUNCTION_POINTERS=0 -s NO_EXIT_RUNTIME=1 -s ERROR_ON_UNDEFINED_SYMBOLS=1 -s \"EXTRA_EXPORTED_RUNTIME_METHODS=[\'ccall\', \'cwrap\', \'setValue\', \'getValue\', \'UTF8ToString\']\" -s \"EXPORTED_FUNCTIONS=[\'___cxa_is_pointer_type\', \'___cxa_can_catch\']\" -s \"DEFAULT_LIBRARY_FUNCS_TO_INCLUDE=[\'setThrew\', \'memset\']\"");
-		}
-		else
-        {
+			ninja.WriteLine($"emcc_flags = -Oz -g {emcc_flags}-s MAIN_MODULE=1 -s EXPORT_ALL=1 -s WASM_OBJECT_FILES=0 -s RESERVED_FUNCTION_POINTERS=64 -s DISABLE_EXCEPTION_CATCHING=0 -s USE_ZLIB=0 -s ASSERTIONS=1 -s WASM=1 -s ALLOW_MEMORY_GROWTH=1 -s BINARYEN=1 -s TOTAL_MEMORY=134217728 -s ALIASING_FUNCTION_POINTERS=0 -s NO_EXIT_RUNTIME=1 -s ERROR_ON_UNDEFINED_SYMBOLS=1 -s \"EXTRA_EXPORTED_RUNTIME_METHODS=[\'ccall\', \'cwrap\', \'setValue\', \'getValue\', \'UTF8ToString\']\" -s \"EXPORTED_FUNCTIONS=[\'___cxa_is_pointer_type\', \'___cxa_can_catch\']\" -s \"DEFAULT_LIBRARY_FUNCS_TO_INCLUDE=[\'setThrew\', \'memset\']\"");
+		}else{
 			ninja.WriteLine("emcc = source $emsdk_env && emcc");
 			// -s ASSERTIONS=2 is very slow
-			ninja.WriteLine($"emcc_flags = -Oz -g {emcc_flags}-s DISABLE_EXCEPTION_CATCHING=0 -s ASSERTIONS=1 -s WASM=1 -s ALLOW_MEMORY_GROWTH=1 -s BINARYEN=1 -s TOTAL_MEMORY=134217728 -s ALIASING_FUNCTION_POINTERS=0 -s NO_EXIT_RUNTIME=1 -s ERROR_ON_UNDEFINED_SYMBOLS=1 -s \"EXTRA_EXPORTED_RUNTIME_METHODS=[\'ccall\', \'cwrap\', \'setValue\', \'getValue\', \'UTF8ToString\']\" -s \"EXPORTED_FUNCTIONS=[\'___cxa_is_pointer_type\', \'___cxa_can_catch\']\" -s \"DEFAULT_LIBRARY_FUNCS_TO_INCLUDE=[\'setThrew\', \'memset\']\"");
+			ninja.WriteLine($"emcc_flags = -Oz -g {emcc_flags}-s DISABLE_EXCEPTION_CATCHING=0 -s WASM_OBJECT_FILES=0  -s ASSERTIONS=1 -s WASM=1 -s ALLOW_MEMORY_GROWTH=1 -s BINARYEN=1 -s TOTAL_MEMORY=134217728 -s ALIASING_FUNCTION_POINTERS=0 -s NO_EXIT_RUNTIME=1 -s ERROR_ON_UNDEFINED_SYMBOLS=1 -s \"EXTRA_EXPORTED_RUNTIME_METHODS=[\'ccall\', \'cwrap\', \'setValue\', \'getValue\', \'UTF8ToString\']\" -s \"EXPORTED_FUNCTIONS=[\'___cxa_is_pointer_type\', \'___cxa_can_catch\']\" -s \"DEFAULT_LIBRARY_FUNCS_TO_INCLUDE=[\'setThrew\', \'memset\']\"");
 		}
 
 		ninja.WriteLine ("wasm_strip = $emscripten_sdkdir/upstream/bin/wasm-strip");
@@ -940,9 +961,9 @@ class Driver {
 		ninja.WriteLine ("  command = $cross --print-icall-table > $out");
 		ninja.WriteLine ("rule gen-icall-table");
 		ninja.WriteLine ("  command = mono $tools_dir/wasm-tuner.exe --gen-icall-table $runtime_table $in > $out");
-        ninja.WriteLine ("rule gen-pinvoke-table");
-        ninja.WriteLine ("  command = mono $tools_dir/wasm-tuner.exe --gen-pinvoke-table $pinvoke_libs $in > $out");
-        ninja.WriteLine ("rule ilstrip");
+		ninja.WriteLine ("rule gen-pinvoke-table");
+		ninja.WriteLine ("  command = mono $tools_dir/wasm-tuner.exe --gen-pinvoke-table $pinvoke_libs $in > $out");
+		ninja.WriteLine ("rule ilstrip");
 		ninja.WriteLine ("  command = cp $in $out; mono $tools_dir/mono-cil-strip.exe $out");
 		ninja.WriteLine ("  description = [IL-STRIP]");
 
@@ -961,7 +982,7 @@ class Driver {
 			ninja.WriteLine ($"build $builddir/{pinvoke_file_name}: cpifdiff {pinvoke_file}");
 			driver_deps += $" $builddir/{pinvoke_file_name}";
 
-            var driver_cflags = enable_aot ? "-DENABLE_AOT=1" : "";
+			var driver_cflags = enable_aot ? "-DENABLE_AOT=1" : "";
 
 			if (add_binding) {
 				var bindings_source_file = Path.GetFullPath (Path.Combine (tool_prefix, "src", "corebindings.c"));
@@ -1001,8 +1022,8 @@ class Driver {
 		var bc_files = "";
 		string linker_infiles = "";
 		string linker_ofiles = "";
-        string linker_ofiles_dedup = "";
-        string dedup_infiles = "";
+		string linker_ofiles_dedup = "";
+		string dedup_infiles = "";
 		if (enable_linker) {
 			string path = Path.Combine (builddir, "linker-in");
 			if (!Directory.Exists (path))
@@ -1026,10 +1047,10 @@ class Driver {
 				a.linkout_path = $"$builddir/linker-out/{filename}";
 				linker_infiles += $"{a.linkin_path} ";
 				linker_ofiles += $" {a.linkout_path}";
-                if (a.aot) {
-                    linker_ofiles_dedup += $" {a.linkout_path}";
-                }
-                ninja.WriteLine ($"build {a.linkin_path}: cp {source_file_path}");
+				if (a.aot) {
+					linker_ofiles_dedup += $" {a.linkout_path}";
+				}
+				ninja.WriteLine ($"build {a.linkin_path}: cp {source_file_path}");
 				a.aotin_path = a.linkout_path;
 				infile = $"{a.aotin_path}";
 			} else {
@@ -1149,7 +1170,7 @@ class Driver {
 					linker_args += $"-p {usermode} {filename} -r linker-in/{filename} ";
 				}
 			} else {
-			foreach (var assembly in root_assemblies) {
+				foreach (var assembly in root_assemblies) {
 					string filename = Path.GetFileName (assembly);
 					linker_args += $"-a linker-in/{filename} ";
 				}
@@ -1202,7 +1223,7 @@ class Driver {
 				{
 					var srcInfo = new FileInfo (sourceFileName);
 					var dstInfo = new FileInfo (destFileName);
-					
+
 					if (srcInfo.LastWriteTime.Ticks > dstInfo.LastWriteTime.Ticks || srcInfo.Length > dstInfo.Length)
 						File.Copy(sourceFileName, destFileName, true);
 					else
