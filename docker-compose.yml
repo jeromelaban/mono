@@ -1,0 +1,17 @@
+version: 2
+services:
+  mono:
+    image: unoplatform/mono-wasm-build:1.0
+    command: > 
+      bash -c "\
+      sudo apt-get update && \
+      sudo apt-get -y install openssh-server && \
+      sudo service ssh start && \
+      tail -f /dev/null
+      "
+    stdin_open: true
+    tty: true
+    ports:
+      - 50222:22
+      - 58000:8000
+      - 58001:8001
