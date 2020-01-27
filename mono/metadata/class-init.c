@@ -767,6 +767,7 @@ check_valid_generic_inst_arguments (MonoGenericInst *inst, MonoError *error)
 /*
  * Create the `MonoClass' for an instantiation of a generic type.
  * We only do this if we actually need it.
+ * This will sometimes return a GTD due to checking the cached_class.
  */
 MonoClass*
 mono_class_create_generic_inst (MonoGenericClass *gclass)
@@ -1186,7 +1187,7 @@ static MonoClass*
 make_generic_param_class (MonoGenericParam *param)
 {
 	MonoClass *klass, **ptr;
-	int count, pos, i;
+	int count, pos, i, min_align;
 	MonoGenericParamInfo *pinfo = mono_generic_param_info (param);
 	MonoGenericContainer *container = mono_generic_param_owner (param);
 	g_assert_checked (container);
@@ -1259,13 +1260,17 @@ make_generic_param_class (MonoGenericParam *param)
 	/* We don't use type_token for VAR since only classes can use it (not arrays, pointer, VARs, etc) */
 	klass->sizes.generic_param_token = !is_anonymous ? pinfo->token : 0;
 
-	/*Init these fields to sane values*/
-	klass->min_align = 1;
+	if (param->gshared_constraint) {
+		MonoClass *constraint_class = mono_class_from_mono_type_internal (param->gshared_constraint);
+		mono_class_init_sizes (constraint_class);
+		klass->has_references = m_class_has_references (constraint_class);
+	}
 	/*
 	 * This makes sure the the value size of this class is equal to the size of the types the gparam is
 	 * constrained to, the JIT depends on this.
 	 */
-	klass->instance_size = MONO_ABI_SIZEOF (MonoObject) + mono_type_stack_size_internal (m_class_get_byval_arg (klass), NULL, TRUE);
+	klass->instance_size = MONO_ABI_SIZEOF (MonoObject) + mono_type_size (m_class_get_byval_arg (klass), &min_align);
+	klass->min_align = min_align;
 	mono_memory_barrier ();
 	klass->size_inited = 1;
 
@@ -3297,7 +3302,7 @@ mono_class_setup_vtable_general (MonoClass *klass, MonoMethod **overrides, int o
 
 	/*
 	 * If a method occupies more than one place in the vtable, and it is
-	 * overriden, then change the other occurances too.
+	 * overriden, then change the other occurrences too.
 	 */
 	if (override_map) {
 		MonoMethod *cm;
@@ -3904,7 +3909,7 @@ mono_class_layout_fields (MonoClass *klass, int base_instance_size, int packing_
 
 	MonoType *klass_byval_arg = m_class_get_byval_arg (klass);
 	if (klass_byval_arg->type == MONO_TYPE_VAR || klass_byval_arg->type == MONO_TYPE_MVAR)
-		instance_size = MONO_ABI_SIZEOF (MonoObject) + mono_type_stack_size_internal (klass_byval_arg, NULL, TRUE);
+		instance_size = MONO_ABI_SIZEOF (MonoObject) + mono_type_size (klass_byval_arg, &min_align);
 	else if (klass_byval_arg->type == MONO_TYPE_PTR)
 		instance_size = MONO_ABI_SIZEOF (MonoObject) + MONO_ABI_SIZEOF (gpointer);
 
@@ -4140,10 +4145,20 @@ static void
 setup_generic_array_ifaces (MonoClass *klass, MonoClass *iface, MonoMethod **methods, int pos, GHashTable *cache)
 {
 	MonoGenericContext tmp_context;
+	MonoGenericClass *gclass;
 	int i;
 
+	// The interface can sometimes be a GTD in cases like IList
+	// See: https://github.com/mono/mono/issues/7095#issuecomment-470465597
+	if (mono_class_is_gtd (iface)) {
+		MonoType *ty = mono_class_gtd_get_canonical_inst (iface);
+		g_assert (ty->type == MONO_TYPE_GENERICINST);
+		gclass = ty->data.generic_class;
+	} else
+		gclass = mono_class_get_generic_class (iface);
+
 	tmp_context.class_inst = NULL;
-	tmp_context.method_inst = mono_class_get_generic_class (iface)->context.class_inst;
+	tmp_context.method_inst = gclass->context.class_inst;
 	//g_print ("setting up array interface: %s\n", mono_type_get_name_full (m_class_get_byval_arg (iface), 0));
 
 	for (i = 0; i < generic_array_method_num; i++) {

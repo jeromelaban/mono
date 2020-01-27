@@ -45,6 +45,7 @@
 #include <process.h>
 #endif
 #include <ws2tcpip.h>
+#include <windows.h>
 #endif
 
 #ifdef HOST_ANDROID
@@ -76,6 +77,7 @@
 #include <mono/utils/networking.h>
 #include <mono/utils/mono-proclib.h>
 #include <mono/utils/w32api.h>
+#include <mono/utils/mono-logger-internals.h>
 #include "debugger-state-machine.h"
 #include "debugger-agent.h"
 #include "mini.h"
@@ -102,6 +104,13 @@
 #ifndef DISABLE_SDB
 
 #include <mono/utils/mono-os-mutex.h>
+
+#include <fcntl.h>
+#include <sys/stat.h>
+
+#ifndef S_IWUSR
+	#define S_IWUSR S_IWRITE
+#endif
 
 #define THREAD_TO_INTERNAL(thread) (thread)->internal_thread
 
@@ -601,6 +610,10 @@ static MonoNativeThreadId debugger_thread_id;
 static MonoThreadHandle *debugger_thread_handle;
 
 static int log_level;
+
+static int file_check_valid_memory = -1;
+
+static char* filename_check_valid_memory;
 
 static gboolean embedding;
 
@@ -1103,6 +1116,12 @@ mono_debugger_agent_cleanup (void)
 	ids_cleanup ();
 
 	mono_de_cleanup ();
+
+	if (file_check_valid_memory != -1) {
+		remove (filename_check_valid_memory);
+		g_free (filename_check_valid_memory);
+		close (file_check_valid_memory);
+	}
 }
 
 /*
@@ -2531,13 +2550,6 @@ save_thread_context (MonoContext *ctx)
 		mono_thread_state_init_from_current (&tls->context);
 }
 
-/* Number of threads suspended */
-/* 
- * If this is equal to the size of thread_to_tls, the runtime is considered
- * suspended.
- */
-static gint32 threads_suspend_count;
-
 static MonoCoopMutex suspend_mutex;
 
 /* Cond variable used to wait for suspend_count becoming 0 */
@@ -2715,11 +2727,13 @@ debugger_interrupt_critical (MonoThreadInfo *info, gpointer user_data)
 	MonoJitInfo *ji;
 
 	data->valid_info = TRUE;
-	ji = mono_jit_info_table_find_internal (
-			(MonoDomain *)mono_thread_info_get_suspend_state (info)->unwind_data [MONO_UNWIND_DATA_DOMAIN],
-			MONO_CONTEXT_GET_IP (&mono_thread_info_get_suspend_state (info)->ctx),
-			TRUE,
-			TRUE);
+	MonoDomain *domain = (MonoDomain *) mono_thread_info_get_suspend_state (info)->unwind_data [MONO_UNWIND_DATA_DOMAIN];
+	if (!domain) {
+		/* not attached */
+		ji = NULL;
+	} else {
+		ji = mono_jit_info_table_find_internal ( domain, MONO_CONTEXT_GET_IP (&mono_thread_info_get_suspend_state (info)->ctx), TRUE, TRUE);
+	}
 
 	/* This is signal safe */
 	thread_interrupt (data->tls, info, ji);
@@ -3020,8 +3034,6 @@ suspend_current (void)
 
 		tls->suspended = FALSE;
 		tls->really_suspended = FALSE;
-
-		threads_suspend_count --;
 
 		mono_coop_mutex_unlock (&suspend_mutex);
 
@@ -3552,21 +3564,24 @@ dbg_path_get_basename (const char *filename)
 static void
 init_jit_info_dbg_attrs (MonoJitInfo *ji)
 {
-	static MonoClass *hidden_klass, *step_through_klass, *non_user_klass;
 	ERROR_DECL (error);
 	MonoCustomAttrInfo *ainfo;
 
 	if (ji->dbg_attrs_inited)
 		return;
 
-	if (!hidden_klass)
+	MONO_STATIC_POINTER_INIT (MonoClass, hidden_klass)
 		hidden_klass = mono_class_load_from_name (mono_defaults.corlib, "System.Diagnostics", "DebuggerHiddenAttribute");
+	MONO_STATIC_POINTER_INIT_END (MonoClass, hidden_klass)
 
-	if (!step_through_klass)
+
+	MONO_STATIC_POINTER_INIT (MonoClass, step_through_klass)
 		step_through_klass = mono_class_load_from_name (mono_defaults.corlib, "System.Diagnostics", "DebuggerStepThroughAttribute");
+	MONO_STATIC_POINTER_INIT_END (MonoClass, step_through_klass)
 
-	if (!non_user_klass)
+	MONO_STATIC_POINTER_INIT (MonoClass, non_user_klass)
 		non_user_klass = mono_class_load_from_name (mono_defaults.corlib, "System.Diagnostics", "DebuggerNonUserCodeAttribute");
+	MONO_STATIC_POINTER_INIT_END (MonoClass, non_user_klass)
 
 	ainfo = mono_custom_attrs_from_method_checked (jinfo_get_method (ji), error);
 	mono_error_cleanup (error); /* FIXME don't swallow the error? */
@@ -4637,13 +4652,12 @@ set_set_notification_for_wait_completion_flag (DbgEngineStackFrame *frame)
 	gpointer builder = get_async_method_builder (frame);
 	g_assert (builder);
 
-	void* args [1];
-	gboolean arg = TRUE;
-	ERROR_DECL (error);
-	args [0] = &arg;
 	MonoMethod* method = get_set_notification_method (mono_class_from_mono_type_internal (builder_field->type));
 	if (method == NULL)
 		return FALSE;
+	gboolean arg = TRUE;
+	ERROR_DECL (error);
+	void *args [ ] = { &arg };
 	mono_runtime_invoke_checked (method, builder, args, error);
 	mono_error_assert_ok (error);
 	return TRUE;
@@ -4902,6 +4916,8 @@ debugger_agent_single_step_from_context (MonoContext *ctx)
 
 	g_assert (tls);
 
+	tls->terminated = FALSE;
+
 	/* Have to save/restore the restore_ctx as we can be called recursively during invokes etc. */
 	memcpy (&orig_restore_state, &tls->restore_state, sizeof (MonoThreadUnwindState));
 	mono_thread_state_init_from_monoctx (&tls->restore_state, ctx);
@@ -4928,6 +4944,11 @@ debugger_agent_breakpoint_from_context (MonoContext *ctx)
 
 	tls = (DebuggerTlsData *)mono_native_tls_get_value (debugger_tls_id);
 	g_assert (tls);
+	
+	//if a thread was suspended and doesn't have any managed stack, it was considered as terminated, 
+	//but it wasn't really terminated because it can execute managed code again, and stop in a breakpoint so here we set terminated as FALSE
+	tls->terminated = FALSE;
+
 	memcpy (&orig_restore_state, &tls->restore_state, sizeof (MonoThreadUnwindState));
 	mono_thread_state_init_from_monoctx (&tls->restore_state, ctx);
 	memcpy (&tls->handler_ctx, ctx, sizeof (MonoContext));
@@ -5208,6 +5229,12 @@ static void
 debugger_agent_handle_exception (MonoException *exc, MonoContext *throw_ctx,
 									  MonoContext *catch_ctx, StackFrameInfo *catch_frame)
 {
+	if (catch_ctx == NULL && catch_frame == NULL && mini_debug_options.suspend_on_unhandled && mono_object_class (exc) != mono_defaults.threadabortexception_class) {
+		mono_runtime_printf_err ("Unhandled exception, suspending...");
+		while (1)
+			;
+	}
+	
 	int i, j, suspend_policy;
 	GSList *events;
 	MonoJitInfo *ji, *catch_ji;
@@ -9504,6 +9531,44 @@ string_commands (int command, guint8 *p, guint8 *end, Buffer *buf)
 	return ERR_NONE;
 }
 
+static void 
+create_file_to_check_memory_address (void) 
+{
+	if (file_check_valid_memory != -1)
+		return;
+	char *file_name = g_strdup_printf ("debugger_check_valid_memory.%d", getpid());
+	filename_check_valid_memory = g_build_filename (g_get_tmp_dir (), file_name, (const char*)NULL);
+	file_check_valid_memory = open(filename_check_valid_memory, O_CREAT | O_WRONLY | O_APPEND, S_IWUSR);
+	g_free (file_name);
+}
+
+static gboolean 
+valid_memory_address (gpointer addr, gint size)
+{
+#ifndef _MSC_VER
+	gboolean ret = TRUE;
+	create_file_to_check_memory_address ();
+	if(file_check_valid_memory < 0) {
+		return TRUE;
+	}
+	write (file_check_valid_memory,  (gpointer)addr, 1);
+	if (errno == EFAULT) {
+		ret = FALSE;
+	}
+#else
+	int i = 0;
+	gboolean ret = FALSE;
+	__try {
+		for (i = 0; i < size; i++)
+			*((volatile char*)addr+i);
+		ret = TRUE;
+	} __except(1) {
+		return ret;
+	}
+#endif	
+	return ret;
+}
+
 static ErrorCode
 pointer_commands (int command, guint8 *p, guint8 *end, Buffer *buf)
 {
@@ -9511,6 +9576,9 @@ pointer_commands (int command, guint8 *p, guint8 *end, Buffer *buf)
 	gint64 addr;
 	MonoClass* klass;
 	MonoDomain* domain = NULL;
+	MonoType *type = NULL;
+	int align;
+	int size = 0;
 
 	switch (command) {
 	case CMD_POINTER_GET_VALUE:
@@ -9522,7 +9590,13 @@ pointer_commands (int command, guint8 *p, guint8 *end, Buffer *buf)
 		if (m_class_get_byval_arg (klass)->type != MONO_TYPE_PTR)
 			return ERR_INVALID_ARGUMENT;
 
-		buffer_add_value (buf, m_class_get_byval_arg (m_class_get_element_class (klass)), (gpointer)addr, domain);
+		type =  m_class_get_byval_arg (m_class_get_element_class (klass));
+		size = mono_type_size (type, &align);
+		
+		if (!valid_memory_address((gpointer)addr, size))
+			return ERR_INVALID_ARGUMENT;
+
+		buffer_add_value (buf, type, (gpointer)addr, domain);
 
 		break;
 	default:
