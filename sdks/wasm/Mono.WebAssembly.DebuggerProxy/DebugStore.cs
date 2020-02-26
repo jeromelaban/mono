@@ -9,32 +9,36 @@ using System.Net.Http;
 using Mono.Cecil.Pdb;
 using Newtonsoft.Json;
 using System.Text.RegularExpressions;
+using System.Threading.Tasks;
+using System.Threading;
 
-namespace WsProxy {
-	internal class BreakPointRequest {
+namespace WebAssembly.Net.Debugging {
+	internal class BreakpointRequest {
 		public string Assembly { get; private set; }
 		public string File { get; private set; }
 		public int Line { get; private set; }
 		public int Column { get; private set; }
 
 		public override string ToString () {
-			return $"BreakPointRequest Assembly: {Assembly} File: {File} Line: {Line} Column: {Column}";
+			return $"BreakpointRequest Assembly: {Assembly} File: {File} Line: {Line} Column: {Column}";
 		}
 
-		public static BreakPointRequest Parse (JObject args, DebugStore store)
+		public static BreakpointRequest Parse (JObject args, DebugStore store)
 		{
-			if (args == null)
+			// Events can potentially come out of order, so DebugStore may not be initialized
+			// The BP being set in these cases are JS ones, which we can safely ignore
+			if (args == null || store == null)
 				return null;
 
 			var url = args? ["url"]?.Value<string> ();
 			if (url == null) {
 				var urlRegex = args?["urlRegex"].Value<string>();
-				var sourceFile = store.GetFileByUrlRegex (urlRegex);
+				var sourceFile = store?.GetFileByUrlRegex (urlRegex);
 
 				url = sourceFile?.DotNetUrl;
 			}
 
-			if (url != null && !url.StartsWith ("dotnet://", StringComparison.InvariantCulture)) {
+			if (url != null && !url.StartsWith ("dotnet://", StringComparison.Ordinal)) {
 				var sourceFile = store.GetFileByUrl (url);
 				url = sourceFile?.DotNetUrl;
 			}
@@ -51,7 +55,7 @@ namespace WsProxy {
 			if (line == null || column == null)
 				return null;
 
-			return new BreakPointRequest () {
+			return new BreakpointRequest () {
 				Assembly = parts.Assembly,
 				File = parts.DocumentPath,
 				Line = line.Value,
@@ -72,7 +76,6 @@ namespace WsProxy {
 		}
 	}
 
-
 	internal class VarInfo {
 		public VarInfo (VariableDebugInformation v)
 		{
@@ -85,9 +88,9 @@ namespace WsProxy {
 			this.Name = p.Name;
 			this.Index = (p.Index + 1) * -1;
 		}
+
 		public string Name { get; private set; }
 		public int Index { get; private set; }
-
 
 		public override string ToString ()
 		{
@@ -97,18 +100,14 @@ namespace WsProxy {
 
 
 	internal class CliLocation {
-
-		private MethodInfo method;
-		private int offset;
-
 		public CliLocation (MethodInfo method, int offset)
 		{
-			this.method = method;
-			this.offset = offset;
+			Method = method;
+			Offset = offset;
 		}
 
-		public MethodInfo Method { get => method; }
-		public int Offset { get => offset; }
+		public MethodInfo Method { get; private set; }
+		public int Offset { get; private set; }
 	}
 
 
@@ -148,7 +147,9 @@ namespace WsProxy {
 			if (obj == null)
 				return null;
 
-			var id = SourceId.TryParse (obj ["scriptId"]?.Value<string> ());
+			if (!SourceId.TryParse (obj ["scriptId"]?.Value<string> (), out var id))
+				return null;
+
 			var line = obj ["lineNumber"]?.Value<int> ();
 			var column = obj ["columnNumber"]?.Value<int> ();
 			if (id == null || line == null || column == null)
@@ -157,18 +158,17 @@ namespace WsProxy {
 			return new SourceLocation (id, line.Value, column.Value);
 		}
 
-		internal JObject ToJObject ()
-		{
-			return JObject.FromObject (new {
+		internal object AsLocation ()
+			=> new {
 				scriptId = id.ToString (),
 				lineNumber = line,
 				columnNumber = column
-			});
-		}
-
+			};
 	}
 
 	internal class SourceId {
+		const string Scheme = "dotnet://";
+
 		readonly int assembly, document;
 
 		public int Assembly => assembly;
@@ -180,25 +180,27 @@ namespace WsProxy {
 			this.document = document;
 		}
 
-
 		public SourceId (string id)
 		{
-			id = id.Substring ("dotnet://".Length);
+			id = id.Substring (Scheme.Length);
 			var sp = id.Split ('_');
 			this.assembly = int.Parse (sp [0]);
 			this.document = int.Parse (sp [1]);
 		}
 
-		public static SourceId TryParse (string id)
+		public static bool TryParse (string id, out SourceId script)
 		{
-			if (!id.StartsWith ("dotnet://", StringComparison.InvariantCulture))
-				return null;
-			return new SourceId (id);
+			script = null;
+			if (id == null || !id.StartsWith (Scheme, StringComparison.Ordinal))
+				return false;
 
+			script = new SourceId (id);
+			return true;
 		}
+
 		public override string ToString ()
 		{
-			return $"dotnet://{assembly}_{document}";
+			return $"{Scheme}{assembly}_{document}";
 		}
 
 		public override bool Equals (object obj)
@@ -282,7 +284,6 @@ namespace WsProxy {
 				.Where (v => !v.IsDebuggerHidden)
 				.Select (v => new VarInfo (v)));
 
-
 			return res.ToArray ();
 		}
 	}
@@ -294,20 +295,19 @@ namespace WsProxy {
 		Dictionary<int, MethodInfo> methods = new Dictionary<int, MethodInfo> ();
 		Dictionary<string, string> sourceLinkMappings = new Dictionary<string, string>();
 		readonly List<SourceFile> sources = new List<SourceFile>();
+		internal string Url { get; private set; }
 
-		public AssemblyInfo (byte[] assembly, byte[] pdb)
+		public AssemblyInfo (string url, byte[] assembly, byte[] pdb)
 		{
-			lock (typeof (AssemblyInfo)) {
-				this.id = ++next_id;
-			}
+			this.id = Interlocked.Increment (ref next_id);
 
 			try {
+				Url = url;
 				ReaderParameters rp = new ReaderParameters (/*ReadingMode.Immediate*/);
-				if (pdb != null) {
-					rp.ReadSymbols = true;
-					rp.SymbolReaderProvider = new PortablePdbReaderProvider ();
+				rp.ReadSymbols = true;
+				rp.SymbolReaderProvider = new PdbReaderProvider ();
+				if (pdb != null)
 					rp.SymbolStream = new MemoryStream (pdb);
-				}
 
 				rp.ReadingMode = ReadingMode.Immediate;
 				rp.InMemory = true;
@@ -315,13 +315,16 @@ namespace WsProxy {
 				this.image = ModuleDefinition.ReadModule (new MemoryStream (assembly), rp);
 			} catch (BadImageFormatException ex) {
 				Console.WriteLine ($"Failed to read assembly as portable PDB: {ex.Message}");
+			} catch (ArgumentNullException) {
+				if (pdb != null)
+					throw;
 			}
 
 			if (this.image == null) {
 				ReaderParameters rp = new ReaderParameters (/*ReadingMode.Immediate*/);
 				if (pdb != null) {
 					rp.ReadSymbols = true;
-					rp.SymbolReaderProvider = new NativePdbReaderProvider ();
+					rp.SymbolReaderProvider = new PdbReaderProvider ();
 					rp.SymbolStream = new MemoryStream (pdb);
 				}
 
@@ -358,7 +361,7 @@ namespace WsProxy {
 			foreach (var m in image.GetTypes().SelectMany(t => t.Methods)) {
 				Document first_doc = null;
 				foreach (var sp in m.DebugInformation.SequencePoints) {
-					if (first_doc == null && !sp.Document.Url.EndsWith (".g.cs")) {
+					if (first_doc == null && !sp.Document.Url.EndsWith (".g.cs", StringComparison.OrdinalIgnoreCase)) {
 						first_doc = sp.Document;
 					}
 					//  else if (first_doc != sp.Document) {
@@ -471,81 +474,110 @@ namespace WsProxy {
 			} else {
 				this.Url = DotNetUrl;
 			}
-
 		}
 
 		internal void AddMethod (MethodInfo mi)
 		{
 			this.methods.Add (mi);
 		}
+
 		public string DebuggerFileName { get; }
 		public string Url { get; }
 		public string AssemblyName => assembly.Name;
 		public string DotNetUrl => $"dotnet://{assembly.Name}/{DebuggerFileName}";
-		public string DocHashCode => "abcdee" + id;
+
 		public SourceId SourceId => new SourceId (assembly.Id, this.id);
 		public Uri SourceLinkUri { get; }
 		public Uri SourceUri { get; }
 
 		public IEnumerable<MethodInfo> Methods => this.methods;
+		public byte[] EmbeddedSource => doc.EmbeddedSource;
+
+		public (int startLine, int startColumn, int endLine, int endColumn) GetExtents ()
+		{
+			var start = methods.OrderBy (m => m.StartLocation.Line).ThenBy (m => m.StartLocation.Column).First ();
+			var end = methods.OrderByDescending (m => m.EndLocation.Line).ThenByDescending (m => m.EndLocation.Column).First ();
+			return (start.StartLocation.Line, start.StartLocation.Column, end.EndLocation.Line, end.EndLocation.Column);
+		}
+
+		public async Task<byte[]> LoadSource ()
+		{
+			if (EmbeddedSource.Length > 0)
+				return await Task.FromResult (EmbeddedSource);
+
+			return null;
+		}
+
+		public object ToScriptSource (int executionContextId, object executionContextAuxData)
+		{
+			return new {
+				scriptId = SourceId.ToString (),
+				url = Url,
+				executionContextId,
+				executionContextAuxData,
+				//hash = "abcdee" + id,
+				dotNetUrl = DotNetUrl,
+			};
+		}
 	}
 
 	internal class DebugStore {
 		List<AssemblyInfo> assemblies = new List<AssemblyInfo> ();
+		HttpClient client = new HttpClient ();
 
-		public DebugStore (string [] loaded_files)
+		class DebugItem {
+			public string Url { get; set; }
+			public Task<byte[][]> Data { get; set; }
+		}
+
+		public async Task Load (SessionId sessionId, string [] loaded_files, CancellationToken token)
 		{
-			bool MatchPdb (string asm, string pdb)
-			{
-				return Path.ChangeExtension (asm, "pdb") == pdb;
-			}
+			static bool MatchPdb (string asm, string pdb)
+				=> Path.ChangeExtension (asm, "pdb") == pdb;
 
 			var asm_files = new List<string> ();
 			var pdb_files = new List<string> ();
-			foreach (var f in loaded_files) {
-				var file_name = f;
+			foreach (var file_name in loaded_files) {
 				if (file_name.EndsWith (".pdb", StringComparison.OrdinalIgnoreCase))
 					pdb_files.Add (file_name);
 				else
 					asm_files.Add (file_name);
 			}
 
-			//FIXME make this parallel
-			foreach (var p in asm_files) {
+			List<DebugItem> steps = new List<DebugItem> ();
+			foreach (var url in asm_files) {
 				try {
-					var pdb = pdb_files.FirstOrDefault (n => MatchPdb (p, n));
-					HttpClient h = new HttpClient ();
-					var assembly_bytes = h.GetByteArrayAsync (p).Result;
-					byte [] pdb_bytes = null;
-					if (pdb != null)
-						pdb_bytes = h.GetByteArrayAsync (pdb).Result;
-
-					this.assemblies.Add (new AssemblyInfo (assembly_bytes, pdb_bytes));
+					var pdb = pdb_files.FirstOrDefault (n => MatchPdb (url, n));
+					steps.Add (
+						new DebugItem {
+								Url = url,
+								Data = Task.WhenAll (client.GetByteArrayAsync (url), pdb != null ? client.GetByteArrayAsync (pdb) : Task.FromResult<byte []> (null))
+						});
 				} catch (Exception e) {
-					Console.WriteLine ($"Failed to read {p} ({e.Message})");
+					Console.WriteLine ($"Failed to read {url} ({e.Message})");
+				}
+			}
+
+			foreach (var step in steps) {
+				try {
+					var bytes = await step.Data;
+					assemblies.Add (new AssemblyInfo (step.Url, bytes[0], bytes[1]));
+				} catch (Exception e) {
+					Console.WriteLine ($"Failed to Load {step.Url} ({e.Message})");
 				}
 			}
 		}
 
 		public IEnumerable<SourceFile> AllSources ()
-		{
-			foreach (var a in assemblies) {
-				foreach (var s in a.Sources)
-					yield return s;
-			}
-		}
+			=> assemblies.SelectMany (a => a.Sources);
 
 		public SourceFile GetFileById (SourceId id)
-		{
-			return AllSources ().FirstOrDefault (f => f.SourceId.Equals (id));
-		}
+			=> AllSources ().FirstOrDefault (f => f.SourceId.Equals (id));
 
 		public AssemblyInfo GetAssemblyByName (string name)
-		{
-			return assemblies.FirstOrDefault (a => a.Name.Equals (name, StringComparison.InvariantCultureIgnoreCase));
-		}
+			=> assemblies.FirstOrDefault (a => a.Name.Equals (name, StringComparison.InvariantCultureIgnoreCase));
 
-		/*	
+		/*
 		V8 uses zero based indexing for both line and column.
 		PPDBs uses one based indexing for both line and column.
 		*/
@@ -598,7 +630,7 @@ namespace WsProxy {
 		PPDBs uses one based indexing for both line and column.
 		*/
 		static bool Match (SequencePoint sp, int line, int column)
-		{ 
+		{
 			var bp = (line: line + 1, column: column + 1);
 
 			if (sp.StartLine > bp.line || sp.EndLine < bp.line)
@@ -617,7 +649,7 @@ namespace WsProxy {
 			return true;
 		}
 
-		public SourceLocation FindBestBreakpoint (BreakPointRequest req)
+		public SourceLocation FindBestBreakpoint (BreakpointRequest req)
 		{
 			var asm = assemblies.FirstOrDefault (a => a.Name.Equals (req.Assembly, StringComparison.OrdinalIgnoreCase));
 			var src = asm?.Sources?.FirstOrDefault (s => s.DebuggerFileName.Equals (req.File, StringComparison.OrdinalIgnoreCase));

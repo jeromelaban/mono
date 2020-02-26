@@ -7,7 +7,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.DependencyInjection;
 
-namespace WsProxy
+namespace WebAssembly.Net.Debugging
 {
 	public class ProxyOptions {
 		public Uri DevToolsUrl { get; set; } = new Uri ("http://localhost:9222");
@@ -60,7 +60,7 @@ namespace WsProxy
 							options.ChromePath = chromePath;
 							options.AppPath = appPath;
 							options.PagePath = pagePath;
-							options.DevToolsUrl = new Uri ("http://localhost:9333");
+							options.DevToolsUrl = new Uri ("http://localhost:0");
 						});
 					})
 					.UseKestrel ()

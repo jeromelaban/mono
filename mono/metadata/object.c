@@ -60,6 +60,10 @@
 #include "icall-decl.h"
 #include "icall-signatures.h"
 
+#if _MSC_VER
+#pragma warning(disable:4312) // FIXME pointer cast to different size
+#endif
+
 // If no symbols in an object file in a static library are referenced, its exports will not be exported.
 // There are a few workarounds:
 // 1. Link to .o/.obj files directly on the link command line,
@@ -5118,29 +5122,8 @@ prepare_thread_to_exec_main (MonoDomain *domain, MonoMethod *method)
 	MonoCustomAttrInfo* cinfo;
 	gboolean has_stathread_attribute;
 
-	if (!domain->entry_assembly) {
-		gchar *str;
-		ERROR_DECL (error);
-		MonoAssembly *assembly;
-
-		assembly = m_class_get_image (method->klass)->assembly;
-		domain->entry_assembly = assembly;
-		/* Domains created from another domain already have application_base and configuration_file set */
-		if (domain->setup->application_base == NULL) {
-			MonoString *basedir = mono_string_new_checked (domain, assembly->basedir, error);
-			mono_error_assert_ok (error);
-			MONO_OBJECT_SETREF_INTERNAL (domain->setup, application_base, basedir);
-		}
-
-		if (domain->setup->configuration_file == NULL) {
-			str = g_strconcat (assembly->image->name, ".config", (const char*)NULL);
-			MonoString *config_file = mono_string_new_checked (domain, str, error);
-			mono_error_assert_ok (error);
-			MONO_OBJECT_SETREF_INTERNAL (domain->setup, configuration_file, config_file);
-			g_free (str);
-			mono_domain_set_options_from_config (domain);
-		}
-	}
+	if (!domain->entry_assembly)
+		mono_domain_ensure_entry_assembly (domain, m_class_get_image (method->klass)->assembly);
 
 	ERROR_DECL (cattr_error);
 	cinfo = mono_custom_attrs_from_method_checked (method, cattr_error);

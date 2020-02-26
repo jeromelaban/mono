@@ -94,8 +94,7 @@ mono_interp_objref (MonoObject **o)
 
 /*
  * Value types are represented on the eval stack as pointers to the
- * actual storage. The size field tells how much storage is allocated.
- * A value type can't be larger than 16 MB.
+ * actual storage. A value type cannot be larger than 16 MB.
  */
 typedef struct {
 	union {
@@ -113,46 +112,41 @@ typedef struct {
 		mono_u nati;
 		gpointer vt;
 	} data;
-#if defined(__ppc__) || defined(__powerpc__)
-	int pad;
-#endif
 } stackval;
 
-typedef struct _InterpFrame InterpFrame;
+typedef struct InterpFrame InterpFrame;
 
 typedef void (*MonoFuncV) (void);
 typedef void (*MonoPIFunc) (void *callme, void *margs);
+
+
+typedef enum {
+	IMETHOD_CODE_INTERP,
+	IMETHOD_CODE_COMPILED,
+	IMETHOD_CODE_UNKNOWN
+} InterpMethodCodeType;
 
 /* 
  * Structure representing a method transformed for the interpreter 
  * This is domain specific
  */
-typedef struct _InterpMethod
-{
+typedef struct InterpMethod InterpMethod;
+struct InterpMethod {
 	/* NOTE: These first two elements (method and
 	   next_jit_code_hash) must be in the same order and at the
 	   same offset as in MonoJitInfo, because of the jit_code_hash
 	   internal hash table in MonoDomain. */
 	MonoMethod *method;
-	struct _InterpMethod *next_jit_code_hash;
-	guint32 locals_size;
-	guint32 total_locals_size;
-	guint32 stack_size;
-	guint32 vt_stack_size;
-	guint32 alloca_size;
-	unsigned int init_locals : 1;
-	unsigned int vararg : 1;
-	unsigned int needs_thread_attach : 1;
+	InterpMethod *next_jit_code_hash;
+
+	// Sort pointers ahead of integers to minimize padding for alignment.
+
 	unsigned short *code;
 	MonoPIFunc func;
-	int num_clauses;
-	MonoExceptionClause *clauses;
+	MonoExceptionClause *clauses; // num_clauses
 	void **data_items;
-	int transformed;
 	guint32 *local_offsets;
 	guint32 *exvar_offsets;
-	unsigned int param_count;
-	unsigned int hasthis;
 	gpointer jit_wrapper;
 	gpointer jit_addr;
 	MonoMethodSignature *jit_sig;
@@ -162,11 +156,25 @@ typedef struct _InterpMethod
 	MonoType **param_types;
 	MonoJitInfo *jinfo;
 	MonoDomain *domain;
+
+	guint32 locals_size;
+	guint32 total_locals_size;
+	guint32 stack_size;
+	guint32 vt_stack_size;
+	guint32 alloca_size;
+	int num_clauses; // clauses
+	int transformed; // boolean
+	unsigned int param_count;
+	unsigned int hasthis; // boolean
 	MonoProfilerCallInstrumentationFlags prof_flags;
+	InterpMethodCodeType code_type;
 #ifdef ENABLE_EXPERIMENT_TIERED
 	MiniTieredCounter tiered_counter;
 #endif
-} InterpMethod;
+	unsigned int init_locals : 1;
+	unsigned int vararg : 1;
+	unsigned int needs_thread_attach : 1;
+};
 
 typedef struct _StackFragment StackFragment;
 struct _StackFragment {
@@ -176,10 +184,14 @@ struct _StackFragment {
 };
 
 typedef struct {
-	StackFragment *first, *last, *current;
+	StackFragment *first, *current;
 	/* For GC sync */
 	int inited;
 } FrameStack;
+
+
+/* Arguments that are passed when invoking only a finally/filter clause from the frame */
+typedef struct FrameClauseArgs FrameClauseArgs;
 
 /* State of the interpreter main loop */
 typedef struct {
@@ -187,19 +199,19 @@ typedef struct {
 	unsigned char *vt_sp;
 	const unsigned short  *ip;
 	GSList *finally_ips;
-	gpointer clause_args;
+	FrameClauseArgs *clause_args;
+	gboolean is_void : 1;
 } InterpState;
 
-struct _InterpFrame {
+struct InterpFrame {
 	InterpFrame *parent; /* parent */
 	InterpMethod  *imethod; /* parent */
-	stackval       *retval; /* parent */
 	stackval       *stack_args; /* parent */
+	stackval       *retval; /* parent */
 	stackval       *stack;
-	/* An address on the native stack associated with the frame, used during EH */
-	gpointer       native_stack_addr;
+	InterpFrame    *next_free;
 	/* Stack fragments this frame was allocated from */
-	StackFragment *iframe_frag, *data_frag;
+	StackFragment *data_frag;
 	/* exception info */
 	const unsigned short  *ip;
 	/* State saved before calls */
@@ -220,8 +232,6 @@ typedef struct {
 	MonoJitExceptionInfo *handler_ei;
 	/* Exception that is being thrown. Set with rest of resume state */
 	guint32 exc_gchandle;
-	/* Stack of InterpFrames */
-	FrameStack iframe_stack;
 	/* Stack of frame data */
 	FrameStack data_stack;
 } ThreadContext;
@@ -260,6 +270,9 @@ mono_interp_get_imethod (MonoDomain *domain, MonoMethod *method, MonoError *erro
 
 void
 mono_interp_print_code (InterpMethod *imethod);
+
+gboolean
+mono_interp_jit_call_supported (MonoMethod *method, MonoMethodSignature *sig);
 
 static inline int
 mint_type(MonoType *type_)

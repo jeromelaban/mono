@@ -8,7 +8,7 @@ using System.IO;
 using System.Text;
 using System.Collections.Generic;
 
-using WsProxy;
+using WebAssembly.Net.Debugging;
 using Newtonsoft.Json.Linq;
 using Xunit;
 
@@ -42,6 +42,12 @@ namespace DebuggerTests
 			eventListeners[evtName] = cb;
 		}
 
+		void FailAllWaitersWithException (JObject exception)
+		{
+			foreach (var tcs in notifications.Values)
+				tcs.SetException (new ArgumentException (exception.ToString ()));
+		}
+
 		async Task OnMessage(string method, JObject args, CancellationToken token)
 		{
 			//System.Console.WriteLine("OnMessage " + method + args);
@@ -58,6 +64,8 @@ namespace DebuggerTests
 			}
 			if (eventListeners.ContainsKey (method))
 				await eventListeners[method](args, token);
+			else if (String.Compare (method, "Runtime.exceptionThrown") == 0)
+				FailAllWaitersWithException (args);
 		}
 
 		public async Task Ready (Func<InspectorClient, CancellationToken, Task> cb = null, TimeSpan? span = null) {
@@ -112,6 +120,7 @@ namespace DebuggerTests
 		static string[] PROBE_LIST = {
 			"/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
 			"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+			"/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
 			"/usr/bin/chromium",
 			"/usr/bin/chromium-browser",
 		};
@@ -133,7 +142,7 @@ namespace DebuggerTests
 		}
 
 		public DebuggerTestBase (string driver = "debugger-driver.html") {
-			startTask = WsProxy.TestHarnessProxy.Start (FindChromePath (), FindTestPath (), driver);
+			startTask = TestHarnessProxy.Start (FindChromePath (), FindTestPath (), driver);
 		}
 
 		public Task Ready ()
