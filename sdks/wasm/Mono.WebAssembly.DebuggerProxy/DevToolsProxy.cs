@@ -8,17 +8,51 @@ using System.Threading;
 using System.IO;
 using System.Text;
 using System.Collections.Generic;
+using Microsoft.Extensions.Logging;
 
 namespace WebAssembly.Net.Debugging {
-	public class SessionId {
-		public string sessionId;
+	internal struct SessionId {
+		public readonly string sessionId;
+
+		public SessionId (string sessionId)
+		{
+			this.sessionId = sessionId;
+		}
+
+		public override int GetHashCode ()
+			=> sessionId?.GetHashCode () ?? 0;
+
+		public override bool Equals (object obj)
+			=> (obj is SessionId) ? ((SessionId) obj).sessionId == sessionId : false;
+
+		public override string ToString ()
+			=> $"session-{sessionId}";
 	}
 
-	public class MessageId : SessionId {
-		public int id;
+	internal struct MessageId {
+		public readonly string sessionId;
+		public readonly int id;
+
+		public MessageId (string sessionId, int id)
+		{
+			this.sessionId = sessionId;
+			this.id = id;
+		}
+
+		public static implicit operator SessionId (MessageId id)
+			=> new SessionId (id.sessionId);
+
+		public override string ToString ()
+			=> $"msg-{sessionId}:::{id}";
+
+		public override int GetHashCode ()
+			=> (sessionId?.GetHashCode () ?? 0) ^ id.GetHashCode ();
+
+		public override bool Equals (object obj)
+			=> (obj is MessageId) ? ((MessageId) obj).sessionId == sessionId && ((MessageId) obj).id == id : false;
 	}
 
-	public struct Result {
+	internal struct Result {
 		public JObject Value { get; private set; }
 		public JObject Error { get; private set; }
 
@@ -27,17 +61,17 @@ namespace WebAssembly.Net.Debugging {
 
 		Result (JObject result, JObject error)
 		{
-                       if (result != null && error != null)
-                               throw new ArgumentException ($"Both {nameof(result)} and {nameof(error)} arguments cannot be non-null.");
+			if (result != null && error != null)
+				throw new ArgumentException ($"Both {nameof(result)} and {nameof(error)} arguments cannot be non-null.");
 
-                       bool resultHasError = String.Compare ((result? ["result"] as JObject)? ["subtype"]?. Value<string> (), "error") == 0;
-                       if (result != null && resultHasError) {
-                               this.Value = null;
-                               this.Error = result;
-                       } else {
-                               this.Value = result;
-                               this.Error = error;
-                       }
+			bool resultHasError = String.Compare ((result? ["result"] as JObject)? ["subtype"]?. Value<string> (), "error") == 0;
+			if (result != null && resultHasError) {
+				this.Value = null;
+				this.Error = result;
+			} else {
+				this.Value = result;
+				this.Error = error;
+			}
 		}
 
 		public static Result FromJson (JObject obj)
@@ -93,7 +127,7 @@ namespace WebAssembly.Net.Debugging {
 			if (pending.Count == 1) {
 				if (current_send != null)
 					throw new Exception ("current_send MUST BE NULL IF THERE'S no pending send");
-				//Console.WriteLine ("sending {0} bytes", bytes.Length);
+				//logger.LogTrace ("sending {0} bytes", bytes.Length);
 				current_send = Ws.SendAsync (new ArraySegment<byte> (bytes), WebSocketMessageType.Text, true, token);
 				return current_send;
 			}
@@ -116,15 +150,22 @@ namespace WebAssembly.Net.Debugging {
 		}
 	}
 
-	public class DevToolsProxy {
+	internal class DevToolsProxy {
 		TaskCompletionSource<bool> side_exception = new TaskCompletionSource<bool> ();
 		TaskCompletionSource<bool> client_initiated_close = new TaskCompletionSource<bool> ();
-		List<(MessageId, TaskCompletionSource<Result>)> pending_cmds = new List<(MessageId, TaskCompletionSource<Result>)> ();
+		Dictionary<MessageId, TaskCompletionSource<Result>> pending_cmds = new Dictionary<MessageId, TaskCompletionSource<Result>> ();
 		ClientWebSocket browser;
 		WebSocket ide;
 		int next_cmd_id;
 		List<Task> pending_ops = new List<Task> ();
 		List<DevToolsQueue> queues = new List<DevToolsQueue> ();
+
+		protected readonly ILogger logger;
+
+		public DevToolsProxy (ILoggerFactory loggerFactory)
+		{
+			logger = loggerFactory.CreateLogger<DevToolsProxy>();
+		}
 
 		protected virtual Task<bool> AcceptEvent (SessionId sessionId, string method, JObject args, CancellationToken token)
 		{
@@ -188,7 +229,7 @@ namespace WebAssembly.Net.Debugging {
 		{
 			try {
 				if (!await AcceptEvent (sessionId, method, args, token)) {
-					//Console.WriteLine ("proxy browser: {0}::{1}",method, args);
+					//logger.LogDebug ("proxy browser: {0}::{1}",method, args);
 					SendEventInternal (sessionId, method, args, token);
 				}
 			} catch (Exception e) {
@@ -210,13 +251,13 @@ namespace WebAssembly.Net.Debugging {
 
 		void OnResponse (MessageId id, Result result)
 		{
-			//Console.WriteLine ("got id {0} res {1}", id, result);
+			//logger.LogTrace ("got id {0} res {1}", id, result);
 			// Fixme
-			var idx = pending_cmds.FindIndex (e => e.Item1.id == id.id && e.Item1.sessionId == id.sessionId);
-			var item = pending_cmds [idx];
-			pending_cmds.RemoveAt (idx);
-
-			item.Item2.SetResult (result);
+			if (pending_cmds.Remove (id, out var task)) {
+				task.SetResult (result);
+				return;
+			}
+			logger.LogError ("Cannot respond to command: {id} with result: {result} - command is not pending", id, result);
 		}
 
 		void ProcessBrowserMessage (string msg, CancellationToken token)
@@ -225,9 +266,9 @@ namespace WebAssembly.Net.Debugging {
 			var res = JObject.Parse (msg);
 
 			if (res ["id"] == null)
-				pending_ops.Add (OnEvent (new SessionId { sessionId = res ["sessionId"]?.Value<string> () }, res ["method"].Value<string> (), res ["params"] as JObject, token));
+				pending_ops.Add (OnEvent (new SessionId (res ["sessionId"]?.Value<string> ()), res ["method"].Value<string> (), res ["params"] as JObject, token));
 			else
-				OnResponse (new MessageId { id = res ["id"].Value<int> (), sessionId = res ["sessionId"]?.Value<string> () }, Result.FromJson (res));
+				OnResponse (new MessageId (res ["sessionId"]?.Value<string> (), res ["id"].Value<int> ()), Result.FromJson (res));
 		}
 
 		void ProcessIdeMessage (string msg, CancellationToken token)
@@ -235,7 +276,10 @@ namespace WebAssembly.Net.Debugging {
 			Log ("protocol", $"ide: {msg}");
 			if (!string.IsNullOrEmpty (msg)) {
 				var res = JObject.Parse (msg);
-				pending_ops.Add (OnCommand (new MessageId { id = res ["id"].Value<int> (), sessionId = res ["sessionId"]?.Value<string> () }, res ["method"].Value<string> (), res ["params"] as JObject, token));
+				pending_ops.Add (OnCommand (
+						new MessageId (res ["sessionId"]?.Value<string> (), res ["id"].Value<int> ()),
+						res ["method"].Value<string> (),
+						res ["params"] as JObject, token));
 			}
 		}
 
@@ -256,9 +300,9 @@ namespace WebAssembly.Net.Debugging {
 			});
 			var tcs = new TaskCompletionSource<Result> ();
 
-			var msgId = new MessageId { id = id, sessionId = sessionId.sessionId };
+			var msgId = new MessageId (sessionId.sessionId, id);
 			//Log ("verbose", $"add cmd id {sessionId}-{id}");
-			pending_cmds.Add ((msgId , tcs));
+			pending_cmds[msgId] = tcs;
 
 			Send (this.browser, o, token);
 			return tcs.Task;
@@ -283,13 +327,14 @@ namespace WebAssembly.Net.Debugging {
 
 		internal void SendResponse (MessageId id, Result result, CancellationToken token)
 		{
-			//Log ("verbose", $"sending response: {id}: {result.ToJObject (id)}");
 			SendResponseInternal (id, result, token);
 		}
 
 		void SendResponseInternal (MessageId id, Result result, CancellationToken token)
 		{
 			JObject o = result.ToJObject (id);
+			if (result.IsErr)
+				logger.LogError ("sending error response {result}", result);
 
 			Send (this.ide, o, token);
 		}
@@ -317,7 +362,7 @@ namespace WebAssembly.Net.Debugging {
 					try {
 						while (!x.IsCancellationRequested) {
 							var task = await Task.WhenAny (pending_ops.ToArray ());
-							//Console.WriteLine ("pump {0} {1}", task, pending_ops.IndexOf (task));
+							//logger.LogTrace ("pump {0} {1}", task, pending_ops.IndexOf (task));
 							if (task == pending_ops [0]) {
 								var msg = ((Task<string>)task).Result;
 								if (msg != null) {
@@ -363,16 +408,16 @@ namespace WebAssembly.Net.Debugging {
 		{
 			switch (priority) {
 			case "protocol":
-				//Console.WriteLine (msg);
+				//logger.LogTrace (msg);
 				break;
 			case "verbose":
-				//Console.WriteLine (msg);
+				//logger.LogDebug (msg);
 				break;
 			case "info":
 			case "warning":
 			case "error":
 			default:
-				Console.WriteLine (msg);
+				logger.LogDebug (msg);
 				break;
 			}
 		}
