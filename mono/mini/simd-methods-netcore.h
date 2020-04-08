@@ -182,6 +182,21 @@ METHOD(LoadDquVector128)
 METHOD(MoveAndDuplicate)
 METHOD(MoveHighAndDuplicate)
 METHOD(MoveLowAndDuplicate)
+// Ssse3
+METHOD(Abs)
+METHOD(AlignRight)
+METHOD(HorizontalAddSaturate)
+METHOD(HorizontalSubtractSaturate)
+METHOD(MultiplyHighRoundScale)
+METHOD(Sign)
 // Sse41
 METHOD(Insert)
 METHOD(TestZ)
+// Sse42
+METHOD(Crc32)
+// ArmBase
+METHOD(LeadingSignCount)
+METHOD(ReverseElementBits)
+// Crc32
+METHOD(ComputeCrc32)
+METHOD(ComputeCrc32C)

@@ -1,6 +1,5 @@
 TOP=$(realpath $(CURDIR)/../..)
 -include $(TOP)/sdks/Make.config
--include $(TOP)/mcs/build/config.make
 include $(TOP)/sdks/versions.mk
 include $(TOP)/sdks/paths.mk
 
@@ -13,7 +12,9 @@ SHELL:=/bin/bash
 #Use either 'release' or 'debug' depending on what you need
 DRIVER_CONF=release
 
-CSC_LOCATION?=$(STANDALONE_CSC_LOCATION)
+# This is duplicated from configure.ac but we can't include config.make as
+# it might not be generated yet
+CSC_LOCATION=$(TOP)/external/roslyn-binaries/Microsoft.Net.Compilers/3.5.0/csc.exe
 
 EMSCRIPTEN_SDK_DIR?=$(TOP)/sdks/builds/toolchains/emsdk
 EMCC=source $(CURDIR)/emsdk_env.sh && emcc
@@ -67,7 +68,7 @@ MINI_TEST_SOURCES = $(patsubst %,$(MINI_PATH)/%,$(MINI_TEST_FILES))
 WASM_FRAMEWORK=$(TOP)/sdks/wasm/framework
 WASM_FRAMEWORK_SOURCE=$(TOP)/sdks/wasm/framework/src
 WASM_FRAMEWORK_SOURCES=$(WASM_FRAMEWORK_SOURCE)/**/*
-WASM_FRAMEWORK_DEPS=/r:$(WASM_FRAMEWORK)/WebAssembly.Bindings.dll /r:$(WASM_FRAMEWORK)/WebAssembly.Net.Http.dll /r:$(WASM_FRAMEWORK)/WebAssembly.Net.WebSockets.dll
+WASM_FRAMEWORK_DEPS=/r:$(WASM_FRAMEWORK)/WebAssembly.Bindings.dll /r:$(WASM_FRAMEWORK)/System.Net.Http.WebAssemblyHttpHandler.dll /r:$(WASM_FRAMEWORK)/WebAssembly.Net.WebSockets.dll
 
 BROWSER_TEST=$(TOP)/sdks/wasm/tests/browser
 BROWSER_TEST_THREADS=$(TOP)/sdks/wasm/tests/browser
@@ -89,6 +90,8 @@ BROWSER_TEST_ASSETS = \
 WASM_TESTS_SRC=$(TOP)/sdks/wasm/tests/src
 WASM_TESTS_BIN=$(TOP)/sdks/wasm/bin
 
+TEST_SOURCE_DIR=$(TOP)/sdks/wasm/tests/src/
+
 UNAME := $(shell uname -s)
 ifeq ($(UNAME),Linux)
 	JSVU_OS=linux64
@@ -98,14 +101,18 @@ ifeq ($(UNAME),Darwin)
 endif
 .PHONY: jsup
 
+NPM_VERSION=@^6.13.4
 NPM=$(CURDIR)/node_modules/node/bin/node $(CURDIR)/node_modules/npm/bin/npm-cli.js
+
+.stamp-npm-$(NPM_VERSION): 
+	npm install npm$(NPM_VERSION)
+	node_modules/npm/bin/npm-cli.js install
+	touch $@
 
 jsup: .stamp-jsvu
 	node_modules/node/bin/node node_modules/jsvu/cli.js --os=$(JSVU_OS) --engines=javascriptcore,spidermonkey,v8
 
-.stamp-jsvu: 
-	npm install npm@^6.13.4
-	node_modules/npm/bin/npm-cli.js install
+.stamp-jsvu: .stamp-npm-$(NPM_VERSION)
 	node_modules/node/bin/node node_modules/jsvu/cli.js --os=$(JSVU_OS) --engines=javascriptcore,spidermonkey,v8
 	touch $@
 
@@ -146,7 +153,7 @@ MONO_THREADS_LIBS = $(TOP)/sdks/out/wasm-runtime-threads-release/lib/{libmono-ee
 MONO_DYNAMIC_LIBS = $(TOP)/sdks/out/wasm-runtime-dynamic-release/lib/{libmono-ee-interp.a,libmono-native.a,libmono-icall-table.a,libmonosgen-2.0.a,libmono-ilgen.a}
 
 EMCC_FLAGS=--profiling-funcs -s WASM=1 -s ALLOW_MEMORY_GROWTH=1 -s BINARYEN=1 -s ALIASING_FUNCTION_POINTERS=0 -s NO_EXIT_RUNTIME=1 -s "EXTRA_EXPORTED_RUNTIME_METHODS=['ccall', 'FS_createPath', 'FS_createDataFile', 'cwrap', 'setValue', 'getValue', 'UTF8ToString', 'addFunction']" -s USE_ZLIB=1 -s "EXPORTED_FUNCTIONS=['_putchar']" --source-map-base http://example.com  -s WASM_OBJECT_FILES=0 -s FORCE_FILESYSTEM=1
-EMCC_DEBUG_FLAGS =-g4 -Os -s ASSERTIONS=1
+EMCC_DEBUG_FLAGS =-g -Os -s ASSERTIONS=1
 EMCC_RELEASE_FLAGS=-Oz --llvm-opts 2 --llvm-lto 1
 EMCC_DYNAMIC_FLAGS=-s MAIN_MODULE=1 -s EXPORT_ALL=1 -s DISABLE_EXCEPTION_CATCHING=0 -s ALLOW_TABLE_GROWTH=1 -s USE_ZLIB=0 -s WASM_OBJECT_FILES=0 -DWASM_SUPPORTS_DLOPEN
 EMCC_THREADS_FLAGS=-s ALLOW_MEMORY_GROWTH=0 -s USE_PTHREADS=1 -s TOTAL_MEMORY=536870912 -pthread -Wl,--shared-memory,--no-check-features -s PTHREAD_POOL_SIZE=2
@@ -367,11 +374,11 @@ $(WASM_FRAMEWORK)/.stamp-framework: $(WASM_FRAMEWORK_SOURCES)
 Simple.Dependency.dll: dependency.cs $(WASM_FRAMEWORK)/.stamp-framework
 	$(CSC) $(CSC_FLAGS) /target:library -out:$@ $(BCL_DEPS) dependency.cs
 
-sample.dll: Simple.Dependency.dll sample.cs $(WASM_FRAMEWORK)/.stamp-framework
-	$(CSC) $(CSC_FLAGS) /target:library -out:$@ /r:Simple.Dependency.dll $(BCL_DEPS) $(WASM_FRAMEWORK_DEPS) sample.cs
+sample.dll: Simple.Dependency.dll sample.cs $(WASM_FRAMEWORK)/.stamp-framework debugger-valuetypes-test.cs
+	$(CSC) $(CSC_FLAGS) /target:library -out:$@ /r:Simple.Dependency.dll $(BCL_DEPS) $(WASM_FRAMEWORK_DEPS) sample.cs debugger-valuetypes-test.cs
 
-debugger-test.dll: debugger-test.cs debugger-test2.cs Simple.Dependency.dll
-	$(CSC) $(CSC_FLAGS) /target:library -out:$@ /r:$(WASM_BCL_DIR)/mscorlib.dll /r:Simple.Dependency.dll debugger-test.cs debugger-test2.cs
+debugger-test.dll: debugger-test.cs debugger-test2.cs debugger-valuetypes-test.cs Simple.Dependency.dll debugger-array-test.cs debugger-evaluate-test.cs
+	$(CSC) $(CSC_FLAGS) /target:library -out:$@ /r:$(WASM_BCL_DIR)/mscorlib.dll /r:Simple.Dependency.dll debugger-test.cs debugger-test2.cs debugger-valuetypes-test.cs debugger-array-test.cs debugger-evaluate-test.cs
 
 OPTIONS_CS = $(TOP)/mcs/class/Mono.Options/Mono.Options/Options.cs
 
@@ -438,17 +445,17 @@ $(eval $(call XunitTestTemplate,System.Xml-xunit,System.Xml-xunit,wasm_System.Xm
 $(eval $(call XunitTestTemplate,System.Xml.Linq-xunit,System.Xml.Linq-xunit,wasm_System.Xml.Linq_xunit-test.dll))
 $(eval $(call XunitTestTemplate,corlib-xunit,corlib-xunit,wasm_corlib_xunit-test.dll))
 
-$(BROWSER_TEST)/.stamp-browser-test-suite: packager.exe $(WASM_FRAMEWORK)/.stamp-framework $(BROWSER_TEST_SOURCES) clean-browser-tests build-sdk 
+$(BROWSER_TEST)/.stamp-browser-test-suite: packager.exe $(WASM_FRAMEWORK)/.stamp-framework $(BROWSER_TEST_SOURCES) clean-browser-tests build-sdk .stamp-npm-$(NPM_VERSION)
 	$(DOTNET_BUILD) tests/browser/src -v normal
 	(cd $(BROWSER_TEST) && $(NPM) install)
 	touch $@
 
-$(BROWSER_TEST_THREADS)/.stamp-browser-test-threads-suite: packager.exe $(WASM_FRAMEWORK)/.stamp-framework $(BROWSER_TEST_SOURCES) clean-browser-tests build-sdk
+$(BROWSER_TEST_THREADS)/.stamp-browser-test-threads-suite: packager.exe $(WASM_FRAMEWORK)/.stamp-framework $(BROWSER_TEST_SOURCES) clean-browser-tests build-sdk .stamp-npm-$(NPM_VERSION)
 	$(DOTNET_BUILD) tests/browser/src -v normal -c DebugThreads
 	(cd $(BROWSER_TEST) && $(NPM) install)
 	touch $@
 
-$(BROWSER_TEST_DYNAMIC)/.stamp-browser-test-dynamic-suite: packager.exe $(WASM_FRAMEWORK)/.stamp-framework $(BROWSER_TEST_SOURCES) clean-browser-tests build-sdk
+$(BROWSER_TEST_DYNAMIC)/.stamp-browser-test-dynamic-suite: packager.exe $(WASM_FRAMEWORK)/.stamp-framework $(BROWSER_TEST_SOURCES) clean-browser-tests build-sdk  .stamp-npm-$(NPM_VERSION)
 	echo BROWSER_TEST_SOURCES: $(BROWSER_TEST_SOURCES)
 	$(DOTNET_BUILD) tests/browser/src -v normal -p:EnableMonoWasmDynamic=true
 	(cd $(BROWSER_TEST) && $(NPM) install)
@@ -466,7 +473,7 @@ $(BROWSER_TEST_DYNAMIC)/.stamp-browser-test-dynamic-suite: packager.exe $(WASM_F
 	touch $@
 
 build-aot-hello: packager.exe hello.exe
-	$(PACKAGER) --emscripten-sdkdir=$(EMSCRIPTEN_SDK_DIR) --mono-sdkdir=$(TOP)/sdks/out -appdir=bin/aot-hello --builddir=obj/aot-hello --aot --template=runtime-tests.js --pinvoke-libs=libfoo hello.exe
+	$(PACKAGER) --emscripten-sdkdir=$(EMSCRIPTEN_SDK_DIR) --mono-sdkdir=$(TOP)/sdks/out -appdir=bin/aot-hello --builddir=obj/aot-hello --aot --nobinding --template=runtime-tests.js --pinvoke-libs=libfoo hello.exe
 	ninja -v -C obj/aot-hello
 
 build-aot-hello-profiled: packager.exe hello.exe data.aotprofile
@@ -498,6 +505,34 @@ build-zlib-aot-hello: packager.exe $(WASM_TESTS_BIN)/zlibtest.exe
 
 run-zlib-aot-hello: build-zlib-aot-hello
 	(cd bin/aot-zlib-sample && $(SM) runtime.js --run zlibtest.exe)
+
+# TimeZoneInfo tests
+
+$(TEST_SOURCE_DIR)/tzdtest.exe: $(TEST_SOURCE_DIR)/tzdtest.cs
+	$(CSC) $(CSC_FLAGS) -out:$@ $(BCL_DEPS) $(TEST_SOURCE_DIR)/tzdtest.cs
+
+run-tzd-sample: build-tzd-sample
+	(cd bin/tzdtest-sample && $(SM) runtime.js --enable-zoneinfo --run tzdtest.exe)
+
+build-tzd-sample: packager.exe $(TEST_SOURCE_DIR)/tzdtest.exe
+	mono packager.exe --nobinding --template=runtime-tests.js --out=bin/tzdtest-sample --copy=ifnewer --asset=zoneinfo/zoneinfo.data --asset=zoneinfo/mono-webassembly-zoneinfo-fs-smd.js.metadata $(TEST_SOURCE_DIR)/tzdtest.exe
+	cp -r /usr/share/zoneinfo ./bin/tzdtest-sample/zoneinfo
+
+build-tzd-interp-sample: packager.exe $(TEST_SOURCE_DIR)/tzdtest.exe
+	mono --debug packager.exe --emscripten-sdkdir=$(EMSCRIPTEN_SDK_DIR) --mono-sdkdir=$(TOP)/sdks/out --copy=ifnewer --asset=zoneinfo/zoneinfo.data --asset=zoneinfo/mono-webassembly-zoneinfo-fs-smd.js.metadata -appdir=bin/interp-tzd-sample --enable-fs --nobinding --builddir=obj/interp-tzd-sample --template=runtime-tests.js $(TEST_SOURCE_DIR)/tzdtest.exe --linker --link-icalls
+	ninja -v -C obj/interp-tzd-sample
+
+run-tzd-interp-sample: build-tzd-interp-sample
+	(cd bin/interp-tzd-sample && $(SM) runtime.js --enable-zoneinfo --run tzdtest.exe)
+
+build-tzd-aot-sample: packager.exe $(TEST_SOURCE_DIR)/tzdtest.exe
+	mono --debug packager.exe --emscripten-sdkdir=$(EMSCRIPTEN_SDK_DIR) --mono-sdkdir=$(TOP)/sdks/out -appdir=bin/aot-tzd-sample --enable-fs --nobinding --copy=ifnewer --asset=zoneinfo/zoneinfo.data --asset=zoneinfo/mono-webassembly-zoneinfo-fs-smd.js.metadata --builddir=obj/aot-tzd-sample --aot --template=runtime-tests.js $(TEST_SOURCE_DIR)/tzdtest.exe
+	ninja -v -C obj/aot-tzd-sample
+
+run-tzd-aot-sample: build-tzd-aot-sample
+	(cd bin/aot-tzd-sample && $(SM) runtime.js --enable-zoneinfo --run tzdtest.exe)
+
+# end TimeZoneInfo tests
 
 build-mixed-sample: packager.exe hello.exe
 	$(PACKAGER) --emscripten-sdkdir=$(EMSCRIPTEN_SDK_DIR) --aot-interp --aot-assemblies=mscorlib --mono-sdkdir=$(TOP)/sdks/out -appdir=bin/mixed-sample --nobinding --builddir=obj/mixed-sample --template=runtime-tests.js hello.exe
@@ -569,6 +604,17 @@ build-aot-profile: packager.exe aot-profile/main.exe
 
 data.aotprofile: build-aot-profile
 	node aot-profile/gen-profile.js $@ bin/aot-profile
+
+coverage-profile/main.exe: coverage-profile/main.cs
+	$(CSC) $(CSC_FLAGS) /unsafe -out:$@ $(BCL_DEPS) $(WASM_FRAMEWORK_DEPS) /r:$(WASM_BCL_DIR)/Facades/System.Memory.dll coverage-profile/main.cs
+
+.PHONY:
+build-coverage: packager.exe coverage-profile/main.exe
+	$(PACKAGER) --emscripten-sdkdir=$(EMSCRIPTEN_SDK_DIR) --mono-sdkdir=$(TOP)/sdks/out -appdir=bin/coverage-profile --builddir=obj/coverage-profile --profile=coverage --template=coverage-profile/runtime.js --asset=coverage-profile/index.html coverage-profile/main.exe
+	ninja -C obj/coverage-profile
+
+coverage.xml: build-coverage
+	node coverage-profile/gen-profile.js $@ bin/coverage-profile
 
 ##
 # Parameters:
@@ -664,7 +710,11 @@ run-all-%:
 	$(MAKE) -C . run-jsc-$*
 
 run-debugger-tests: build-debugger-test-app build-dbg-testsuite
-	dotnet test DebuggerTestSuite
+	if [ ! -z "$(TEST_FILTER)" ]; then \
+		dotnet test DebuggerTestSuite --filter FullyQualifiedName~$(TEST_FILTER); \
+	else \
+		dotnet test DebuggerTestSuite $(TEST_ARGS); \
+	fi
 
 run-browser-tests: build-browser-test-suite
 	(cd $(BROWSER_TEST) && $(NPM) test)
@@ -695,6 +745,7 @@ clean: clean-browser-tests
 	$(RM) -r mini_tests.dll
 	$(RM) -r main.exe
 	$(RM) -r binding-tests.dll
+	$(RM) -r coverage.xml
 	$(RM) -r $(WASM_FRAMEWORK)/.stamp-framework
 	$(RM) -r $(WASM_FRAMEWORK)/netstandard2.0
 	$(RM) $(WASM_FRAMEWORK)/WebAssembly.*.dll
@@ -724,9 +775,9 @@ package: build build-sdk build-dbg-proxy
 	cp framework/WebAssembly.Bindings.dll tmp/framework
 	cp framework/WebAssembly.Bindings.pdb tmp/framework
 	cp framework/WebAssembly.Bindings.xml tmp/framework
-	cp framework/WebAssembly.Net.Http.dll tmp/framework
-	cp framework/WebAssembly.Net.Http.pdb tmp/framework
-	cp framework/WebAssembly.Net.Http.xml tmp/framework
+	cp framework/System.Net.Http.WebAssemblyHttpHandler.dll tmp/framework
+	cp framework/System.Net.Http.WebAssemblyHttpHandler.pdb tmp/framework
+	cp framework/System.Net.Http.WebAssemblyHttpHandler.xml tmp/framework
 	cp framework/WebAssembly.Net.WebSockets.dll tmp/framework
 	cp framework/WebAssembly.Net.WebSockets.pdb tmp/framework
 	cp framework/WebAssembly.Net.WebSockets.xml tmp/framework
@@ -786,4 +837,11 @@ clean-browser-tests: clean-sdk
 	$(RM) -r $(BROWSER_TEST)/.stamp-browser-test-threads-suite
 	$(RM) -r $(BROWSER_TEST)/node-modules
 	$(RM) -r $(BROWSER_TEST)/publish
-	$(RM) -r $(BROWSER_TEST)/source/**/bin $(BROWSER_TEST)/source/**/**/bin $(BROWSER_TEST)/source/**/obj $(BROWSER_TEST)/source/**/**/obj publish
+	$(RM) -r $(BROWSER_TEST)/src/**/bin $(BROWSER_TEST)/src/**/**/bin $(BROWSER_TEST)/src/**/obj $(BROWSER_TEST)/src/**/**/obj publish
+
+clean-framework:
+	$(RM) -r $(WASM_FRAMEWORK)/.stamp-framework
+	$(RM) -r $(WASM_FRAMEWORK)/netstandard2.0
+	$(RM) $(WASM_FRAMEWORK)/WebAssembly.*.dll
+	$(RM) $(WASM_FRAMEWORK)/WebAssembly.*.pdb
+	$(RM) $(WASM_FRAMEWORK)/WebAssembly.*.xml

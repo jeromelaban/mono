@@ -313,6 +313,7 @@ icall_table_lookup_symbol (void *func)
 void mono_initialize_internals ()
 {
 	mono_add_internal_call ("WebAssembly.Runtime::InvokeJS", mono_wasm_invoke_js);
+	// TODO: what happens when two types in different assemblies have the same FQN?
 
 	// Blazor specific custom routines - see dotnet_support.js for backing code
 	mono_add_internal_call ("WebAssembly.JSInterop.InternalCalls::InvokeJSMarshalled", mono_wasm_invoke_js_marshalled);
@@ -732,4 +733,28 @@ EMSCRIPTEN_KEEPALIVE void
 mono_wasm_enable_on_demand_gc (void)
 {
 	mono_wasm_enable_gc = 1;
+}
+
+// Returns the local timezone default is UTC.
+EM_JS(size_t, mono_wasm_timezone_get_local_name, (), 
+{
+	var res = "UTC";
+	try { 
+		res = Intl.DateTimeFormat().resolvedOptions().timeZone; 
+	} catch(e) {} 
+
+	var buff = Module._malloc((res.length + 1) * 2);
+	stringToUTF16 (res, buff, (res.length + 1) * 2);
+	return buff;
+})
+
+void
+mono_timezone_get_local_name (MonoString *result)
+{
+	// WASM returns back an int pointer to a string UTF16 buffer.
+	// We then cast to `mono_unichar2*`.  Returning `mono_unichar2*` from the JavaScript call will
+	// result in cast warnings from the compiler.
+	mono_unichar2 *tzd_local_name = (mono_unichar2*)mono_wasm_timezone_get_local_name ();
+	result = mono_string_from_utf16 (tzd_local_name);
+	free (tzd_local_name);
 }
