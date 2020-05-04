@@ -122,7 +122,7 @@ namespace DebuggerTests
 			Console.WriteLine ($"Back from PlaceholderMethod, {c.id}");
 		}
 
-		public static async Task<bool> ValueTypeLocalsAsync (bool call_other)
+		public static async Task<bool> ValueTypeLocalsAsync (bool call_other = false)
 		{
 			var gvclass_arr = new SimpleGenericStruct<Point> [] {
 				new SimpleGenericStruct<Point> { Id = "gvclass_arr#1#Id", Color = RGB.Red, Value = new Point { X = 100, Y = 200, Id = "gvclass_arr#1#Value#Id", Color = RGB.Red } },
@@ -157,12 +157,12 @@ namespace DebuggerTests
 		}
 
 		// A workaround for method invocations on structs not working right now
-		public static async Task EntryPointForStructMethod (bool call_other)
+		public static async Task EntryPointForStructMethod (bool call_other = false)
 		{
 			await Point.AsyncMethod (call_other);
 		}
 
-		public static void GenericValueTypeLocals2 (bool call_other)
+		public static void GenericValueTypeLocals2 (bool call_other = false)
 		{
 			var gvclass_arr = new SimpleGenericStruct<Point[]> [] {
 				new SimpleGenericStruct<Point[]> {
@@ -229,6 +229,13 @@ namespace DebuggerTests
 			sc_arg.Id = "sc_arg#Id";
 			Console.WriteLine ($"AsyncInstanceMethod sc_arg: {sc_arg.Id}, local_gs: {local_gs.Id}");
 		}
+
+		public void GenericInstanceMethod<T> (T sc_arg) where T: SimpleClass
+		{
+			var local_gs = new SimpleGenericStruct<int> { Id = "local_gs#Id", Color = RGB.Green, Value = 4 };
+			sc_arg.Id = "sc_arg#Id";
+			Console.WriteLine ($"AsyncInstanceMethod sc_arg: {sc_arg.Id}, local_gs: {local_gs.Id}");
+		}
 	}
 
 	public class SimpleClass
@@ -252,5 +259,27 @@ namespace DebuggerTests
 		public string Id { get; set; }
 		public RGB Color { get; set; }
 		public T Value { get; set; }
+	}
+
+	public class EntryClass {
+		public static void run ()
+		{
+			ArrayTestsClass.PrimitiveTypeLocals (true);
+			ArrayTestsClass.ValueTypeLocals (true);
+			ArrayTestsClass.ObjectTypeLocals (true);
+
+			ArrayTestsClass.GenericTypeLocals (true);
+			ArrayTestsClass.GenericValueTypeLocals (true);
+			ArrayTestsClass.GenericValueTypeLocals2 (true);
+
+			ArrayTestsClass.ObjectArrayMembers ();
+
+			ArrayTestsClass.ValueTypeLocalsAsync (true).Wait ();
+
+			ArrayTestsClass.EntryPointForStructMethod (true).Wait ();
+
+			var sc = new SimpleClass { X = 10, Y = 45, Id = "sc#Id", Color = RGB.Blue };
+			new Point { X = 90, Y = -4, Id = "point#Id", Color = RGB.Green }.GenericInstanceMethod (sc);
+		}
 	}
 }
