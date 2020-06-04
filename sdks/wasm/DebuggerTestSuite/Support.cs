@@ -121,9 +121,9 @@ namespace DebuggerTests
 		}
 
 		static string[] PROBE_LIST = {
-			"/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
 			"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
 			"/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+			"/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
 			"/usr/bin/chromium",
 			"/usr/bin/chromium-browser",
 		};
@@ -224,13 +224,13 @@ namespace DebuggerTests
 			Assert.Equal (expected_loc_str, loc_str);
 		}
 
-		internal void CheckNumber (JToken locals, string name, int value) {
+		internal void CheckNumber<T> (JToken locals, string name, T value) {
 			foreach (var l in locals) {
 				if (name != l["name"]?.Value<string> ())
 					continue;
 				var val = l["value"];
 				Assert.Equal ("number", val ["type"]?.Value<string> ());
-				Assert.Equal (value, val["value"]?.Value <int> ());
+				Assert.Equal (value, val["value"].Value <T> ());
 				return;
 			}
 			Assert.True(false, $"Could not find variable '{name}'");
@@ -286,7 +286,7 @@ namespace DebuggerTests
 		internal async Task CheckDateTimeValue (JToken value, DateTime expected)
 		{
 			AssertEqual ("System.DateTime", value ["className"]?.Value<string> (), "className");
-			AssertEqual (expected.ToString (), value ["description"]?.Value<string> (), "className");
+			AssertEqual (expected.ToString (), value ["description"]?.Value<string> (), "description");
 
 			var members = await GetProperties (value ["objectId"]?.Value<string> ());
 
@@ -486,8 +486,9 @@ namespace DebuggerTests
 			}
 		}
 
-		internal async Task CheckCustomType (JToken actual_val, JToken exp_val, string label)
+		internal async Task CheckCustomType (JToken actual, JToken exp_val, string label)
 		{
+			var actual_val = actual ["value"];
 			var ctype = exp_val["__custom_type"].Value<string>();
 			switch (ctype) {
 				case "delegate":
@@ -499,13 +500,24 @@ namespace DebuggerTests
 
 					if (exp_val ["is_null"]?.Value<bool>() == false) {
 						var exp_prefix = $"({exp_val ["type_name"]?.Value<string>()})";
-						AssertStartsWith (exp_prefix, actual_val ["value"]?.Value<string> (), $"{label}-type_name");
+						AssertStartsWith (exp_prefix, actual_val ["value"]?.Value<string> (), $"{label}-value");
 						AssertStartsWith (exp_prefix, actual_val ["description"]?.Value<string> (), $"{label}-description");
 					} else {
 						var exp_prefix = $"({exp_val ["type_name"]?.Value<string>()}) 0";
-						AssertEqual (exp_prefix, actual_val ["value"]?.Value<string> (), $"{label}-type_name");
+						AssertEqual (exp_prefix, actual_val ["value"]?.Value<string> (), $"{label}-value");
 						AssertEqual (exp_prefix, actual_val ["description"]?.Value<string> (), $"{label}-description");
 					}
+					break;
+				}
+
+				case "getter": {
+					var get = actual ["get"];
+					Assert.True (get != null, $"[{label}] No `get` found");
+
+					AssertEqual ("Function", get ["className"]?.Value<string> (), $"{label}-className");
+					AssertStartsWith ($"get {exp_val ["type_name"]?.Value<string> ()} ()", get ["description"]?.Value<string> (), $"{label}-description");
+					AssertEqual ("function", get ["type"]?.Value<string> (), $"{label}-type");
+
 					break;
 				}
 
@@ -535,7 +547,11 @@ namespace DebuggerTests
 
 					AssertEqual (i.ToString (), act_i ["name"]?.Value<string> (), $"{label}-[{i}].name");
 
-					await CheckValue (act_i["value"], exp_i, $"{label}-{i}th value");
+					if (exp_i ["__custom_type"] != null) {
+						await CheckCustomType (act_i, exp_i, $"{label}-{i}th value");
+					} else {
+						await CheckValue (act_i["value"], exp_i, $"{label}-{i}th value");
+					}
 				}
 
 				return;
@@ -555,16 +571,17 @@ namespace DebuggerTests
 
 				var actual_obj = actual.FirstOrDefault(jt => jt["name"]?.Value<string>() == exp_name);
 				if (actual_obj == null) {
-					Console.WriteLine($"actual: {actual}, exp_name: {exp_name}, exp_val: {exp_val}");
 					Assert.True(actual_obj != null, $"[{label}] Could not find property named '{exp_name}'");
 				}
 
-				var actual_val = actual_obj["value"];
 				Assert.True(actual_obj != null, $"[{label}] not value found for property named '{exp_name}'");
 
+				var actual_val = actual_obj["value"];
 				if (exp_val.Type == JTokenType.Array) {
 					var actual_props = await GetProperties(actual_val["objectId"]?.Value<string>());
 					await CheckProps (actual_props, exp_val, $"{label}-{exp_name}");
+				} else if (exp_val ["__custom_type"] != null) {
+					await CheckCustomType (actual_obj, exp_val, $"{label}#{exp_name}");
 				} else {
 					await CheckValue (actual_val, exp_val, $"{label}#{exp_name}");
 				}
@@ -702,13 +719,11 @@ namespace DebuggerTests
 			return evaluate_result;
 		}
 
-		internal async Task<Result> SetBreakpoint (string url_key, int line, int column, bool expect_ok=true)
+		internal async Task<Result> SetBreakpoint (string url_key, int line, int column, bool expect_ok=true, bool use_regex = false)
 		{
-			var bp1_req = JObject.FromObject(new {
-				lineNumber = line,
-				columnNumber = column,
-				url = dicFileToUrl[url_key],
-			});
+			var bp1_req = !use_regex ?
+				JObject.FromObject(new { lineNumber = line, columnNumber = column, url = dicFileToUrl[url_key],}) :
+				JObject.FromObject(new { lineNumber = line, columnNumber = column, urlRegex = url_key, });
 
 			var bp1_res = await ctx.cli.SendCommand ("Debugger.setBreakpointByUrl", bp1_req, ctx.token);
 			Assert.True (expect_ok ? bp1_res.IsOk : bp1_res.IsErr);
@@ -716,11 +731,23 @@ namespace DebuggerTests
 			return bp1_res;
 		}
 
-		internal async Task<Result> SetBreakpointInMethod (string assembly, string type, string method) {
-			var req = JObject.FromObject (new { assemblyName = assembly, typeName = type, methodName = method });
+		internal async Task<Result> SetBreakpointInMethod (string assembly, string type, string method, int lineOffset = 0, int col = 0) {
+			var req = JObject.FromObject (new { assemblyName = assembly, typeName = type, methodName = method, lineOffset = lineOffset });
 
 			// Protocol extension
-			var res = await ctx.cli.SendCommand ("Dotnet-test.setBreakpointByMethod", req, ctx.token);
+			var res = await ctx.cli.SendCommand ("DotnetDebugger.getMethodLocation", req, ctx.token);
+			Assert.True (res.IsOk);
+
+			var m_url = res.Value ["result"]["url"].Value<string> ();
+			var m_line = res.Value ["result"]["line"].Value<int> ();
+
+			var bp1_req = JObject.FromObject(new {
+				lineNumber = m_line + lineOffset,
+				columnNumber = col,
+				url = m_url
+			});
+
+			res = await ctx.cli.SendCommand ("Debugger.setBreakpointByUrl", bp1_req, ctx.token);
 			Assert.True (res.IsOk);
 
 			return res;
@@ -733,16 +760,14 @@ namespace DebuggerTests
 						$"Actual:   {actual?.ToString()}\n");
 
 		internal void AssertStartsWith (string expected, string actual, string label)
-			=> Assert.True(actual?.StartsWith (expected), $"[{label}] Does not start with the expected string\nExpected: {expected}\nActual:  {actual}");
+			=> Assert.True(actual?.StartsWith (expected), $"[{label}] Does not start with the expected string\nExpected: {expected}\nActual:   {actual}");
 
 		internal static Func<int, int, string, string, object> TSimpleClass = (X, Y, Id, Color) => new {
 			X =     TNumber (X),
 			Y =     TNumber (Y),
 			Id =    TString (Id),
 			Color = TEnum ("DebuggerTests.RGB", Color),
-			//PointWithCustomGetter = TValueType ("DebuggerTests.Point")
-			// only automatic properties are supported currently!
-			PointWithCustomGetter = TSymbol ("DebuggerTests.Point { get; }")
+			PointWithCustomGetter = TGetter ("PointWithCustomGetter")
 		};
 
 		internal static Func<int, int, string, string, object> TPoint = (X, Y, Id, Color) => new {
@@ -800,6 +825,8 @@ namespace DebuggerTests
 		internal static JObject TIgnore ()
 			=> JObject.FromObject (new { __custom_type = "ignore_me" });
 
+		internal static JObject TGetter (string type)
+			=> JObject.FromObject (new { __custom_type = "getter", type_name = type });
 	}
 
 	class DebugTestContext

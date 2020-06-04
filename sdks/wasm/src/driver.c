@@ -13,15 +13,7 @@
 #include <mono/utils/mono-dl-fallback.h>
 #include <mono/jit/jit.h>
 
-#ifdef GEN_PINVOKE
-#include "pinvoke-table.h"
-#else
-#ifdef ENABLE_NETCORE
-#include "pinvoke-tables-default-netcore.h"
-#else
-#include "pinvoke-tables-default.h"
-#endif
-#endif
+#include "pinvoke.h"
 
 #ifdef CORE_BINDINGS
 void core_initialize_internals ();
@@ -69,6 +61,13 @@ void mono_trace_init (void);
 #define g_new0(type, size) ((type *) calloc (sizeof (type), (size)))
 
 static MonoDomain *root_domain;
+
+void
+mono_wasm_printerr (const char *message)
+{
+	fprintf (stderr, "%s\n", message);
+	fflush (stderr);
+}
 
 static MonoString*
 mono_wasm_invoke_js (MonoString *str, int *is_exception)
@@ -172,10 +171,9 @@ static void *sysglobal_native_handle;
 static void*
 wasm_dl_load (const char *name, int flags, char **err, void *user_data)
 {
-	for (int i = 0; i < sizeof (pinvoke_tables) / sizeof (void*); ++i) {
-		if (!strcmp (name, pinvoke_names [i]))
-			return pinvoke_tables [i];
-	}
+	void* handle = wasm_dl_lookup_pinvoke_table (name);
+	if (handle)
+		return handle;
 
 #ifdef ENABLE_NETCORE
 	if (!strcmp (name, "System.Globalization.Native"))
@@ -187,17 +185,6 @@ wasm_dl_load (const char *name, int flags, char **err, void *user_data)
 #endif
 
 	return NULL;
-}
-
-static mono_bool
-wasm_dl_is_pinvoke_tables (void* handle)
-{
-	for (int i = 0; i < sizeof (pinvoke_tables) / sizeof (void*); ++i) {
-		if (pinvoke_tables [i] == handle) {
-			return 1;
-		}
-	}
-	return 0;
 }
 
 static void*
@@ -216,8 +203,14 @@ wasm_dl_symbol (void *handle, const char *name, char **err, void *user_data)
 
 	PinvokeImport *table = (PinvokeImport*)handle;
 	for (int i = 0; table [i].name; ++i) {
-		if (!strcmp (table [i].name, name))
+		if (!strcmp (table [i].name, name)) {
+			if (table [i].func == mono_wasm_pinvoke_vararg_stub) {
+				fprintf (stderr, "PInvoke method '%s' has multiple conflicting declarations. PInvokes with varargs are not supported.\n", table [i].name);
+				fflush (stderr);
+				exit (1);
+			}
 			return table [i].func;
+		}
 	}
 	return NULL;
 }

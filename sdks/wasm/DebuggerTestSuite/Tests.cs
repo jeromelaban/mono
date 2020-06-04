@@ -5,6 +5,8 @@ using Newtonsoft.Json.Linq;
 using Xunit;
 using WebAssembly.Net.Debugging;
 
+[assembly: CollectionBehavior (CollectionBehavior.CollectionPerAssembly)]
+
 namespace DebuggerTests
 {
 
@@ -46,6 +48,110 @@ namespace DebuggerTests
 				Assert.Equal("dotnet://debugger-test.dll/debugger-test.cs", scripts [loc["scriptId"]?.Value<string> ()]);
 				Assert.Equal (5, loc ["lineNumber"]);
 				Assert.Equal (2, loc ["columnNumber"]);
+			});
+		}
+
+		[Fact]
+		public async Task CreateJSBreakpoint () {
+			// Test that js breakpoints get set correctly
+			var insp = new Inspector ();
+
+			//Collect events
+			var scripts = SubscribeToScripts(insp);
+
+			await Ready ();
+			await insp.Ready (async (cli, token) => {
+				ctx = new DebugTestContext (cli, insp, token, scripts);
+				// 13 24
+				// 13 31
+				var bp1_res = await SetBreakpoint ("/debugger-driver.html", 13, 24);
+
+				Assert.EndsWith ("debugger-driver.html", bp1_res.Value ["breakpointId"].ToString());
+				Assert.Equal (1, bp1_res.Value ["locations"]?.Value<JArray> ()?.Count);
+
+				var loc = bp1_res.Value ["locations"]?.Value<JArray> ()[0];
+
+				Assert.NotNull (loc ["scriptId"]);
+				Assert.Equal (13, loc ["lineNumber"]);
+				Assert.Equal (24, loc ["columnNumber"]);
+
+				var bp2_res = await SetBreakpoint ("/debugger-driver.html", 13, 31);
+
+				Assert.EndsWith ("debugger-driver.html", bp2_res.Value ["breakpointId"].ToString());
+				Assert.Equal (1, bp2_res.Value ["locations"]?.Value<JArray> ()?.Count);
+
+				var loc2 = bp2_res.Value ["locations"]?.Value<JArray> ()[0];
+
+				Assert.NotNull (loc2 ["scriptId"]);
+				Assert.Equal (13, loc2 ["lineNumber"]);
+				Assert.Equal (31, loc2 ["columnNumber"]);
+			});
+		}
+
+		[Fact]
+		public async Task CreateJS0Breakpoint () {
+			// Test that js column 0 does as expected
+			var insp = new Inspector ();
+
+			//Collect events
+			var scripts = SubscribeToScripts(insp);
+
+			await Ready ();
+			await insp.Ready (async (cli, token) => {
+				ctx = new DebugTestContext (cli, insp, token, scripts);
+				// 13 24
+				// 13 31
+				var bp1_res = await SetBreakpoint ("/debugger-driver.html", 13, 0);
+
+				Assert.EndsWith ("debugger-driver.html", bp1_res.Value ["breakpointId"].ToString());
+				Assert.Equal (1, bp1_res.Value ["locations"]?.Value<JArray> ()?.Count);
+
+				var loc = bp1_res.Value ["locations"]?.Value<JArray> ()[0];
+
+				Assert.NotNull (loc ["scriptId"]);
+				Assert.Equal (13, loc ["lineNumber"]);
+				Assert.Equal (24, loc ["columnNumber"]);
+
+				var bp2_res = await SetBreakpoint ("/debugger-driver.html", 13, 31);
+
+				Assert.EndsWith ("debugger-driver.html", bp2_res.Value ["breakpointId"].ToString());
+				Assert.Equal (1, bp2_res.Value ["locations"]?.Value<JArray> ()?.Count);
+
+				var loc2 = bp2_res.Value ["locations"]?.Value<JArray> ()[0];
+
+				Assert.NotNull (loc2 ["scriptId"]);
+				Assert.Equal (13, loc2 ["lineNumber"]);
+				Assert.Equal (31, loc2 ["columnNumber"]);
+			});
+		}
+
+		[Theory]
+		[InlineData (0)]
+		[InlineData (44)]
+		public async Task CheckMultipleBreakpointsOnSameLine (int col) {
+			var insp = new Inspector ();
+
+			var scripts = SubscribeToScripts(insp);
+
+			await Ready ();
+			await insp.Ready (async (cli, token) => {
+				ctx = new DebugTestContext (cli, insp, token, scripts);
+
+				var bp1_res = await SetBreakpoint ("dotnet://debugger-test.dll/debugger-array-test.cs", 197, col);
+				Assert.EndsWith ("debugger-array-test.cs", bp1_res.Value["breakpointId"].ToString());
+				Assert.Equal (1, bp1_res.Value ["locations"]?.Value<JArray> ()?.Count);
+
+				var loc = bp1_res.Value ["locations"]?.Value<JArray> ()[0];
+
+				CheckLocation ("dotnet://debugger-test.dll/debugger-array-test.cs", 197, 44, scripts, loc);
+
+				var bp2_res = await SetBreakpoint ("dotnet://debugger-test.dll/debugger-array-test.cs", 197, 49);
+				Assert.EndsWith ("debugger-array-test.cs", bp2_res.Value["breakpointId"].ToString());
+				Assert.Equal (1, bp2_res.Value ["locations"]?.Value<JArray> ()?.Count);
+
+				var loc2 = bp2_res.Value ["locations"]?.Value<JArray> ()[0];
+
+				CheckLocation ("dotnet://debugger-test.dll/debugger-array-test.cs", 197, 49, scripts, loc2);
 			});
 		}
 
@@ -191,6 +297,36 @@ namespace DebuggerTests
 				test_fn: (locals) => {
 					CheckSymbol (locals, "c0", "8364 '€'");
 					CheckSymbol (locals, "c1", "65 'A'");
+				}
+			);
+
+		[Fact]
+		public async Task InspectLocalsTypesAtBreakpointSite () =>
+			await CheckInspectLocalsAtBreakpointSite (
+				"dotnet://debugger-test.dll/debugger-test2.cs", 40, 2, "Types",
+				"window.setTimeout(function() { invoke_static_method (\"[debugger-test] Fancy:Types\")(); }, 1);",
+				use_cfo: false,
+				test_fn: (locals) => {
+						CheckNumber (locals, "dPI", Math.PI);
+						CheckNumber (locals, "fPI", (float)Math.PI);
+						CheckNumber (locals, "iMax", int.MaxValue);
+						CheckNumber (locals, "iMin", int.MinValue);
+						CheckNumber (locals, "uiMax", uint.MaxValue);
+						CheckNumber (locals, "uiMin", uint.MinValue);
+
+						CheckNumber (locals, "l", uint.MaxValue * (long)2);
+						//CheckNumber (locals, "lMax", long.MaxValue); // cannot be represented as double
+						//CheckNumber (locals, "lMin", long.MinValue); // cannot be represented as double
+
+						CheckNumber (locals, "sbMax", sbyte.MaxValue);
+						CheckNumber (locals, "sbMin", sbyte.MinValue);
+						CheckNumber (locals, "bMax", byte.MaxValue);
+						CheckNumber (locals, "bMin", byte.MinValue);
+
+						CheckNumber (locals, "sMax", short.MaxValue);
+						CheckNumber (locals, "sMin", short.MinValue);
+						CheckNumber (locals, "usMin", ushort.MinValue);
+						CheckNumber (locals, "usMax", ushort.MaxValue);
 				}
 			);
 
@@ -865,6 +1001,139 @@ namespace DebuggerTests
 			});
 		}
 
+		[Fact]
+		public async Task CheckUpdatedValueTypeFieldsOnResume ()
+		{
+			var insp = new Inspector ();
+			//Collect events
+			var scripts = SubscribeToScripts(insp);
+
+			await Ready();
+			await insp.Ready (async (cli, token) => {
+				ctx = new DebugTestContext (cli, insp, token, scripts);
+				var debugger_test_loc = "dotnet://debugger-test.dll/debugger-valuetypes-test.cs";
+
+				var lines = new [] {186, 189};
+				await SetBreakpoint (debugger_test_loc, lines [0], 3);
+				await SetBreakpoint (debugger_test_loc, lines [1], 3);
+
+				var pause_location = await EvaluateAndCheck (
+					"window.setTimeout(function() { invoke_static_method ('[debugger-test] DebuggerTests.ValueTypesTest:MethodUpdatingValueTypeMembers'); }, 1);",
+					debugger_test_loc, lines [0], 3, "MethodUpdatingValueTypeMembers");
+
+				var dt = new DateTime (1, 2, 3, 4, 5, 6);
+				await CheckLocals (pause_location, dt);
+
+				// Resume
+				dt = new DateTime (9, 8, 7, 6, 5, 4);
+				pause_location = await SendCommandAndCheck (JObject.FromObject (new{}), "Debugger.resume", debugger_test_loc, lines[1], 3, "MethodUpdatingValueTypeMembers");
+				await CheckLocals (pause_location, dt);
+			});
+
+			async Task CheckLocals (JToken pause_location, DateTime dt)
+			{
+				var locals = await GetProperties (pause_location ["callFrames"][0]["callFrameId"].Value<string> ());
+				await CheckProps (locals, new {
+					obj = TObject ("DebuggerTests.ClassForToStringTests"),
+					vt = TObject ("DebuggerTests.StructForToStringTests")
+				}, "locals");
+
+				var obj_props = await GetObjectOnLocals (locals, "obj");
+				{
+					await CheckProps (obj_props, new {
+						DT = TValueType ("System.DateTime", dt.ToString ())
+					}, "locals#obj.DT", num_fields: 5);
+
+					await CheckDateTime (obj_props, "DT", dt);
+				}
+
+				var vt_props = await GetObjectOnLocals (locals, "obj");
+				{
+					await CheckProps (vt_props, new {
+						DT = TValueType ("System.DateTime", dt.ToString ())
+					}, "locals#obj.DT", num_fields: 5);
+
+					await CheckDateTime (vt_props, "DT", dt);
+				}
+			}
+		}
+
+		[Fact]
+		public async Task CheckUpdatedValueTypeLocalsOnResumeAsync ()
+		{
+			var insp = new Inspector ();
+			//Collect events
+			var scripts = SubscribeToScripts(insp);
+
+			await Ready();
+			await insp.Ready (async (cli, token) => {
+				ctx = new DebugTestContext (cli, insp, token, scripts);
+				var debugger_test_loc = "dotnet://debugger-test.dll/debugger-valuetypes-test.cs";
+
+				var lines = new [] { 195, 197 };
+				await SetBreakpoint (debugger_test_loc, lines [0], 3);
+				await SetBreakpoint (debugger_test_loc, lines [1], 3);
+
+				var pause_location = await EvaluateAndCheck (
+					"window.setTimeout(function() { invoke_static_method ('[debugger-test] DebuggerTests.ValueTypesTest:MethodUpdatingValueTypeLocalsAsync'); }, 1);",
+					debugger_test_loc, lines [0], 3, "MoveNext");
+
+				var dt = new DateTime (1, 2, 3, 4, 5, 6);
+				var locals = await GetProperties (pause_location ["callFrames"][0]["callFrameId"].Value<string> ());
+				await CheckDateTime (locals, "dt", dt);
+
+				// Resume
+				dt = new DateTime (9, 8, 7, 6, 5, 4);
+				pause_location = await SendCommandAndCheck (JObject.FromObject (new{}), "Debugger.resume", debugger_test_loc, lines[1], 3, "MoveNext");
+				locals = await GetProperties (pause_location ["callFrames"][0]["callFrameId"].Value<string> ());
+				await CheckDateTime (locals, "dt", dt);
+			});
+		}
+
+		[Fact]
+		public async Task CheckUpdatedVTArrayMembersOnResume ()
+		{
+			var insp = new Inspector ();
+			//Collect events
+			var scripts = SubscribeToScripts(insp);
+
+			await Ready();
+			await insp.Ready (async (cli, token) => {
+				ctx = new DebugTestContext (cli, insp, token, scripts);
+				var debugger_test_loc = "dotnet://debugger-test.dll/debugger-valuetypes-test.cs";
+
+				var lines = new [] { 205, 207 };
+				await SetBreakpoint (debugger_test_loc, lines [0], 3);
+				await SetBreakpoint (debugger_test_loc, lines [1], 3);
+
+				var dt = new DateTime (1, 2, 3, 4, 5, 6);
+				var pause_location = await EvaluateAndCheck (
+					"window.setTimeout(function() { invoke_static_method ('[debugger-test] DebuggerTests.ValueTypesTest:MethodUpdatingVTArrayMembers'); }, 1);",
+					debugger_test_loc, lines [0], 3, "MethodUpdatingVTArrayMembers");
+				await CheckArrayElements (pause_location, dt);
+
+				// Resume
+				dt = new DateTime (9, 8, 7, 6, 5, 4);
+				pause_location = await SendCommandAndCheck (JObject.FromObject (new{}), "Debugger.resume", debugger_test_loc, lines[1], 3, "MethodUpdatingVTArrayMembers");
+				await CheckArrayElements (pause_location, dt);
+			});
+
+			async Task CheckArrayElements (JToken pause_location, DateTime dt)
+			{
+				var locals = await GetProperties (pause_location ["callFrames"][0]["callFrameId"].Value<string> ());
+				await CheckProps (locals, new {
+					ssta = TArray ("DebuggerTests.StructForToStringTests[]", 1)
+				}, "locals");
+
+				var ssta = await GetObjectOnLocals (locals, "ssta");
+				var sst0 = await GetObjectOnLocals (ssta, "0");
+				await CheckProps (sst0, new {
+					DT = TValueType ("System.DateTime", dt.ToString ())
+				}, "dta [0]", num_fields: 5);
+
+				await CheckDateTime (sst0, "DT", dt);
+			}
+		}
 		[Theory]
 		[InlineData (false)]
 		[InlineData (true)]
