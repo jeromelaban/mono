@@ -9,9 +9,11 @@
 #include <mono/metadata/assembly.h>
 #include <mono/metadata/tokentype.h>
 #include <mono/metadata/threads.h>
+#include <mono/metadata/image.h>
 #include <mono/utils/mono-logger.h>
 #include <mono/utils/mono-dl-fallback.h>
 #include <mono/jit/jit.h>
+#include <mono/jit/mono-private-unstable.h>
 
 #include "pinvoke.h"
 
@@ -138,7 +140,7 @@ struct WasmAssembly_ {
 static WasmAssembly *assemblies;
 static int assembly_count;
 
-EMSCRIPTEN_KEEPALIVE void
+EMSCRIPTEN_KEEPALIVE int
 mono_wasm_add_assembly (const char *name, const unsigned char *data, unsigned int size)
 {
 	int len = strlen (name);
@@ -147,7 +149,7 @@ mono_wasm_add_assembly (const char *name, const unsigned char *data, unsigned in
 		//FIXME handle debugging assemblies with .exe extension
 		strcpy (&new_name [len - 3], "dll");
 		mono_register_symfile_for_assembly (new_name, data, size);
-		return;
+		return 1;
 	}
 	WasmAssembly *entry = g_new0 (WasmAssembly, 1);
 	entry->assembly.name = strdup (name);
@@ -156,6 +158,7 @@ mono_wasm_add_assembly (const char *name, const unsigned char *data, unsigned in
 	entry->next = assemblies;
 	assemblies = entry;
 	++assembly_count;
+	return mono_has_pdb_checksum (data, size);
 }
 
 EMSCRIPTEN_KEEPALIVE void
@@ -259,13 +262,12 @@ icall_table_lookup (MonoMethod *method, char *classname, char *methodname, char 
 
 	const char *image_name = mono_image_get_name (mono_class_get_image (mono_method_get_class (method)));
 
-#ifdef ICALL_TABLE_mscorlib
 	if (!strcmp (image_name, "mscorlib") || !strcmp (image_name, "System.Private.CoreLib")) {
-		indexes = mscorlib_icall_indexes;
-		indexes_size = sizeof (mscorlib_icall_indexes) / 4;
-		handles = mscorlib_icall_handles;
-		funcs = mscorlib_icall_funcs;
-		assert (sizeof (mscorlib_icall_indexes [0]) == 4);
+		indexes = corlib_icall_indexes;
+		indexes_size = sizeof (corlib_icall_indexes) / 4;
+		handles = corlib_icall_handles;
+		funcs = corlib_icall_funcs;
+		assert (sizeof (corlib_icall_indexes [0]) == 4);
 	}
 #ifdef ICALL_TABLE_System
 	if (!strcmp (image_name, "System")) {
@@ -280,8 +282,10 @@ icall_table_lookup (MonoMethod *method, char *classname, char *methodname, char 
 	void *p = bsearch (&token_idx, indexes, indexes_size, 4, compare_int);
 	if (!p) {
 		return NULL;
+		/*
 		printf ("wasm: Unable to lookup icall: %s\n", mono_method_get_name (method));
 		exit (1);
+		*/
 	}
 
 	uint32_t idx = (int*)p - indexes;
@@ -290,7 +294,6 @@ icall_table_lookup (MonoMethod *method, char *classname, char *methodname, char 
 	//printf ("ICALL: %s %x %d %d\n", methodname, token, idx, (int)(funcs [idx]));
 
 	return funcs [idx];
-#endif
 }
 
 static const char*
@@ -301,6 +304,31 @@ icall_table_lookup_symbol (void *func)
 }
 
 #endif
+
+/*
+ * get_native_to_interp:
+ *
+ *   Return a pointer to a wasm function which can be used to enter the interpreter to
+ * execute METHOD from native code.
+ * EXTRA_ARG is the argument passed to the interp entry functions in the runtime.
+ */
+void*
+get_native_to_interp (MonoMethod *method, void *extra_arg)
+{
+	uint32_t token = mono_method_get_token (method);
+	MonoClass *klass = mono_method_get_class (method);
+	MonoImage *image = mono_class_get_image (klass);
+	MonoAssembly *assembly = mono_image_get_assembly (image);
+	MonoAssemblyName *aname = mono_assembly_get_name (assembly);
+	const char *name = mono_assembly_name_get_name (aname);
+	char key [128];
+
+	assert (strlen (name) < 100);
+	sprintf (key, "%s_%d", name, token);
+
+	void *addr = wasm_dl_get_native_to_interp (key, extra_arg);
+	return addr;
+}
 
 void mono_initialize_internals ()
 {
@@ -314,7 +342,6 @@ void mono_initialize_internals ()
 #ifdef CORE_BINDINGS
 	core_initialize_internals();
 #endif
-
 }
 
 EMSCRIPTEN_KEEPALIVE void
@@ -331,6 +358,7 @@ mono_wasm_load_runtime (const char *managed_path, int enable_debugging)
 	mini_parse_debug_option ("top-runtime-invoke-unhandled");
 
 	mono_dl_fallback_register (wasm_dl_load, wasm_dl_symbol, NULL, NULL);
+	mono_wasm_install_get_native_to_interp_tramp (get_native_to_interp);
 
 #ifdef ENABLE_AOT
 	// Defined in driver-gen.c
