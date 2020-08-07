@@ -189,6 +189,7 @@ public class PInvokeTableGenerator
 
 	static bool IsBlittable (TypeReference type) {
 		switch (type.MetadataType) {
+		case MetadataType.Void:
 		case MetadataType.Char:
 		case MetadataType.Boolean:
 		case MetadataType.Byte:
@@ -206,6 +207,10 @@ public class PInvokeTableGenerator
 		case MetadataType.Pointer:
 		case MetadataType.ByReference:
 			return true;
+		case MetadataType.ValueType: {
+			var tdef = type.Resolve ();
+			return tdef != null && tdef.IsEnum;
+		}
 		default:
 			return false;
 		}
